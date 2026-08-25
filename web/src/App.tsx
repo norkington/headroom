@@ -6,6 +6,7 @@ import { GpuCard } from "./components/GpuCard";
 import { ServerPanel } from "./components/ServerPanel";
 import { ModelList } from "./components/ModelList";
 import { ProbePanel } from "./components/ProbePanel";
+import { Downloads } from "./components/Downloads";
 
 interface GpuResponse {
   cuda_mapping: CudaMapping;
@@ -108,8 +109,10 @@ export function App() {
 
       <section>
         <h2>Inspect a quant before downloading it</h2>
-        <ProbePanel />
+        <ProbePanel onAdded={refresh} />
       </section>
+
+      <Downloads onComplete={refresh} />
 
       <section>
         <h2>Models</h2>

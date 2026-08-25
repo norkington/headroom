@@ -364,3 +364,165 @@ def test_non_gguf_input_explains_the_likely_cause() -> None:
 
     with pytest.raises(GgufError, match="gated"):
         parse(BytesIO(b"<html>401 Unauthorized</html>"), source="x")
+
+
+# ---------------------------------------------------------------- registry writes
+
+
+def test_adding_an_entry_preserves_everything_else(fake_registry: Path) -> None:
+    """models.json belongs to the user and is shared with their shell scripts.
+
+    Comment blocks, the template, and unrelated entries must survive a write
+    untouched -- this app is a guest in that file.
+    """
+    from headroom.registry import add_entry
+
+    original = json.loads(fake_registry.read_text(encoding="utf-8"))
+    original["_comment"] = ["a comment the user wrote"]
+    fake_registry.write_text(json.dumps(original, indent=2), encoding="utf-8")
+
+    add_entry(fake_registry, "another", {"label": "Another", "serve": {}})
+
+    after = json.loads(fake_registry.read_text(encoding="utf-8"))
+    assert after["_comment"] == ["a comment the user wrote"]
+    assert "_template" in after["models"], "the template must survive"
+    assert after["models"]["demo"] == original["models"]["demo"], "existing entry changed"
+    assert "another" in after["models"]
+
+
+def test_a_backup_is_written_before_the_edit(fake_registry: Path) -> None:
+    from headroom.registry import add_entry
+
+    before = fake_registry.read_text(encoding="utf-8")
+    add_entry(fake_registry, "another", {"label": "Another"})
+
+    backup = fake_registry.with_suffix(fake_registry.suffix + ".bak")
+    assert backup.exists(), "no backup was written"
+    assert backup.read_text(encoding="utf-8") == before, "backup does not match the pre-edit file"
+
+
+def test_existing_keys_are_refused(fake_registry: Path) -> None:
+    """Silently replacing an entry would discard measurements someone earned."""
+    from headroom.registry import RegistryError, add_entry
+
+    with pytest.raises(RegistryError, match="already in the registry"):
+        add_entry(fake_registry, "demo", {"label": "clobbered"})
+
+
+def test_private_keys_are_refused(fake_registry: Path) -> None:
+    from headroom.registry import RegistryError, add_entry
+
+    with pytest.raises(RegistryError, match="private"):
+        add_entry(fake_registry, "_sneaky", {"label": "x"})
+
+
+def test_serve_block_is_not_inherited_across_architectures(fake_registry: Path) -> None:
+    """The rule the whole registry design exists to enforce.
+
+    A micro-batch or context size tuned for one architecture can be actively
+    wrong for another, because the bottleneck moves. Copying it over would
+    produce a config that looks authoritative and is not.
+    """
+    from headroom.registry import derive_entry, load
+
+    reg = load(fake_registry)
+    donor = reg.get("demo")
+    assert donor.serve["ctx"] == 8192
+
+    entry = derive_entry(
+        key="different",
+        label="Different Architecture",
+        repo="x/y",
+        filename="y.gguf",
+        directory="/tmp/y",
+        size_gib=5.0,
+        architecture="some-other-arch",
+        has_mtp=False,
+        template={"serve": {"ctx": 4096}},
+        inherit_from=donor,
+    )
+
+    assert entry["serve"]["ctx"] == 4096, "template default should win, not the donor's 8192"
+    assert "does not transfer" in entry["measured"]["status"]
+
+
+def test_serve_block_is_inherited_within_an_architecture_but_marked(fake_registry: Path) -> None:
+    from headroom.registry import derive_entry, load
+
+    reg = load(fake_registry)
+    donor = reg.get("demo")
+
+    entry = derive_entry(
+        key="sibling",
+        label="Same Architecture",
+        repo="x/y",
+        filename="y.gguf",
+        directory="/tmp/y",
+        size_gib=5.0,
+        architecture=donor.arch,
+        has_mtp=True,
+        template={"serve": {"ctx": 4096}},
+        inherit_from=donor,
+    )
+
+    assert entry["serve"]["ctx"] == 8192, "same architecture should inherit"
+    assert "INHERITED" in entry["measured"]["status"]
+    assert "NOT measured" in entry["measured"]["status"]
+    assert entry["verified"]["benched"] is False, "inherited numbers are not verification"
+
+
+def test_mtp_comes_from_the_probe_not_from_the_donor(fake_registry: Path) -> None:
+    """Whether a speculative head exists is a fact about the file, not a guess."""
+    from headroom.registry import derive_entry, load
+
+    reg = load(fake_registry)
+    donor = reg.get("demo")
+    assert donor.serve["mtp"] is True
+
+    entry = derive_entry(
+        key="nomtp",
+        label="No Speculative Head",
+        repo="x/y",
+        filename="y.gguf",
+        directory="/tmp/y",
+        size_gib=5.0,
+        architecture=donor.arch,
+        has_mtp=False,
+        inherit_from=donor,
+    )
+    assert entry["serve"]["mtp"] is False, "the probe found no head; the donor's true must not win"
+
+
+def test_speculative_decoding_forces_a_small_micro_batch(fake_registry: Path) -> None:
+    """The draft context's buffers scale with -ub, so the two are coupled."""
+    from headroom.registry import derive_entry
+
+    entry = derive_entry(
+        key="spec",
+        label="Speculative",
+        repo="x/y",
+        filename="y.gguf",
+        directory="/tmp/y",
+        size_gib=5.0,
+        architecture="a",
+        has_mtp=True,
+        template={"serve": {"ubatch": 4096}},
+    )
+    assert entry["serve"]["ubatch"] == 512
+
+
+def test_env_paths_tolerate_trailing_whitespace(monkeypatch) -> None:
+    """A trailing space in an env var must not leak into derived paths.
+
+    `set VAR=value && cmd` in cmd.exe captures the space before the `&&`.
+    Windows still opens the file, so nothing looks wrong -- but every derived
+    path inherits the space, and a backup lands as "models.json .bak".
+    """
+    from headroom.app import Settings
+
+    monkeypatch.setenv("HEADROOM_REGISTRY", "C:/models/models.json   ")
+    settings = Settings()
+
+    assert str(settings.registry_path).endswith("models.json")
+    derived = settings.registry_path.with_suffix(settings.registry_path.suffix + ".bak")
+    assert derived.name == "models.json.bak"

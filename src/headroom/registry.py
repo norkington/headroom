@@ -257,3 +257,138 @@ def build_argv(
             argv += ["--image-min-tokens", str(entry.vision["image_min_tokens"])]
 
     return argv
+
+
+# --------------------------------------------------------------------------
+# Writing
+# --------------------------------------------------------------------------
+
+
+def derive_entry(
+    *,
+    key: str,
+    label: str,
+    repo: str,
+    filename: str,
+    directory: str,
+    size_gib: float,
+    architecture: str,
+    has_mtp: bool,
+    template: dict[str, Any] | None = None,
+    inherit_from: ModelEntry | None = None,
+) -> dict[str, Any]:
+    """Build a registry entry from a probe result.
+
+    Two rules govern what goes in the ``serve`` block, and both exist because
+    getting them wrong produces a config that looks authoritative and is not:
+
+    **Tuning does not transfer across architectures.** A serve block is only
+    inherited when the architecture matches exactly. Otherwise the template's
+    conservative defaults are used, because a micro-batch or context size tuned
+    for one architecture can be actively wrong for another -- the bottleneck
+    moves, and the number that was optimal becomes the number that fails.
+
+    **Inherited is not measured.** Even on an architecture match, ``measured``
+    records that the figures came from somewhere else and were never observed on
+    this file, and every ``verified`` flag stays false. A number presented as
+    measured when it was copied is the kind of quiet dishonesty that makes an
+    entire registry untrustworthy.
+
+    ``mtp`` is the one setting derived from evidence rather than inherited: the
+    probe read the tensor table, so whether a speculative-decoding head exists is
+    a fact about this file, not a guess.
+    """
+    if inherit_from is not None and inherit_from.arch == architecture:
+        serve = dict(inherit_from.serve)
+        vision = dict(inherit_from.vision)
+        provenance = (
+            f"INHERITED from {inherit_from.key!r} (same architecture). NOT measured on this "
+            "file -- run a benchmark and replace these values."
+        )
+    else:
+        base = template or {}
+        serve = dict(base.get("serve") or {})
+        vision = dict(base.get("vision") or {})
+        if inherit_from is not None:
+            provenance = (
+                f"NOT MEASURED. Defaults only -- {inherit_from.key!r} was not inherited because "
+                f"its architecture ({inherit_from.arch!r}) differs from {architecture!r}, and "
+                "tuning does not transfer across architectures."
+            )
+        else:
+            provenance = "NOT MEASURED. Template defaults only."
+
+    # Derived from the tensor table, so this one is evidence.
+    serve["mtp"] = bool(has_mtp)
+    if has_mtp:
+        # Speculative decoding builds a second context whose compute buffers
+        # scale with the micro-batch, so the two cannot be tuned independently.
+        serve["ubatch"] = min(int(serve.get("ubatch", 512) or 512), 512)
+
+    return {
+        "label": label,
+        "repo": repo,
+        "file": filename,
+        "mmproj": None,
+        "dir": directory,
+        "size_gib": round(size_gib, 3),
+        "arch": architecture,
+        "license": None,
+        "uncensored": False,
+        "why_this_build": [f"Added from a tensor-table probe of {repo}."],
+        "serve": serve,
+        "vision": vision or {"supported": False},
+        "measured": {"status": provenance},
+        "verified": {
+            "header_probed": True,
+            "mtp_tensors": 1 if has_mtp else 0,
+            "loads": False,
+            "benched": False,
+            "needle_tested": False,
+        },
+    }
+
+
+def add_entry(
+    path: str | Path, key: str, entry: dict[str, Any], *, overwrite: bool = False
+) -> None:
+    """Add an entry to models.json, preserving everything already there.
+
+    This file is shared with the user's own launch scripts, so it is treated as
+    theirs rather than as this application's private state:
+
+    - **A backup is written first**, next to the original, so a bad edit is
+      always recoverable.
+    - **The write is atomic** -- a temporary file is renamed into place, so a
+      crash mid-write cannot leave a half-written registry that neither this app
+      nor a shell script can parse.
+    - **Existing keys are refused** unless overwrite is explicit. Silently
+      replacing an entry would discard measurements someone earned.
+    - Comment keys, the template, and unrelated entries are read and written
+      back untouched.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise RegistryError(f"registry not found: {path}")
+    if key.startswith(PRIVATE_PREFIX):
+        raise RegistryError(f"{key!r} starts with {PRIVATE_PREFIX!r}, which marks private entries")
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    models = raw.setdefault("models", {})
+    if key in models and not overwrite:
+        raise RegistryError(
+            f"{key!r} is already in the registry. Choose another name, or pass overwrite "
+            "if you mean to replace it and lose its recorded measurements."
+        )
+
+    models[key] = entry
+    if not raw.get("default"):
+        raw["default"] = key
+
+    backup = path.with_suffix(path.suffix + ".bak")
+    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    log.info("added %r to %s (backup at %s)", key, path, backup.name)

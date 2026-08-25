@@ -585,3 +585,69 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
   overflow-x: auto;
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------- add / downloads */
+.add-row {
+  display: flex;
+  gap: 9px;
+  margin: 14px 0 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.add-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  padding: 7px 11px;
+  border-radius: 3px;
+  border: 1px solid var(--rule-2);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.add-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.download {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  padding: 14px 17px;
+  margin-bottom: 11px;
+}
+.download.complete { border-left-color: var(--ok); }
+.download.failed { border-left-color: var(--critical); }
+.download.cancelled { border-left-color: var(--ink-3); }
+
+.download-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.dl-name {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+  align-items: center;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+}
+.download-stats .k {
+  display: block;
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.download-stats button { padding: 4px 11px; font-size: 0.78rem; }

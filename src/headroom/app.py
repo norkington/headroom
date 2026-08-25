@@ -26,12 +26,28 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import downloads as downloads_mod
 from . import gguf as gguf_mod
 from . import gpu as gpu_mod
 from . import registry as registry_mod
 from . import server as server_mod
 
 log = logging.getLogger(__name__)
+
+
+def _env_path(name: str, default: str) -> Path:
+    """Read a path from the environment, tolerating stray whitespace.
+
+    A trailing space in an environment variable is easy to produce on Windows --
+    `set VAR=value && cmd` in cmd.exe captures the space before the `&&` -- and
+    it fails in a way that is almost invisible. Windows will happily open
+    ``"models.json "``, so the app reads the right file and looks correct, while
+    every path *derived* from it inherits the space: a backup written alongside
+    lands as ``models.json .bak`` instead of ``models.json.bak``.
+
+    Found exactly that way. Stripping costs nothing and removes the whole class.
+    """
+    return Path(os.environ.get(name, default).strip())
 
 
 @dataclass(slots=True)
@@ -43,27 +59,21 @@ class Settings:
     """
 
     registry_path: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get("HEADROOM_REGISTRY", r"C:\AI\models\models.json")
-        )
+        default_factory=lambda: _env_path("HEADROOM_REGISTRY", r"C:\AI\models\models.json")
     )
     llama_server: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get(
-                "HEADROOM_LLAMA_SERVER",
-                r"C:\src\llama.cpp\build\bin\Release\llama-server.exe",
-            )
+        default_factory=lambda: _env_path(
+            "HEADROOM_LLAMA_SERVER",
+            r"C:\src\llama.cpp\build\bin\Release\llama-server.exe",
         )
     )
     log_dir: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get(
-                "HEADROOM_LOG_DIR",
-                # Never under Documents: Controlled Folder Access silently blocks
-                # writes there on Windows, and a blocked write looks like a bug
-                # in whatever tried to log.
-                os.path.join(os.environ.get("LOCALAPPDATA", "."), "headroom", "logs"),
-            )
+        default_factory=lambda: _env_path(
+            "HEADROOM_LOG_DIR",
+            # Never under Documents: Controlled Folder Access silently blocks
+            # writes there on Windows, and a blocked write looks like a bug in
+            # whatever tried to log.
+            os.path.join(os.environ.get("LOCALAPPDATA", "."), "headroom", "logs"),
         )
     )
     port: int = int(os.environ.get("HEADROOM_SERVER_PORT", "8080"))
@@ -76,6 +86,7 @@ class State:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.backend: gpu_mod.GpuBackend = gpu_mod.NvmlBackend()
+        self.downloads = downloads_mod.DownloadManager()
         self.cuda_mapping = gpu_mod.CudaMapping()
         self.mapping_resolved = False
 
@@ -354,6 +365,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "findings": [asdict(f) for f in analysis.findings],
             "free_vram_mib": free_vram,
         }
+
+    # ---------------------------------------------------------------- downloads
+    @app.get("/api/downloads")
+    async def downloads_list() -> dict[str, Any]:
+        hr: State = app.state.hr
+        return {"downloads": [d.to_dict() for d in hr.downloads.list()]}
+
+    @app.delete("/api/downloads/{download_id}")
+    async def download_cancel(download_id: str) -> dict[str, Any]:
+        hr: State = app.state.hr
+        if not hr.downloads.cancel(download_id):
+            raise HTTPException(status_code=404, detail="no such active download")
+        # The partial file is kept deliberately, so resuming costs seconds
+        # rather than starting the whole transfer again.
+        return {"cancelled": True, "note": "partial file kept; starting again will resume"}
+
+    # ---------------------------------------------------------------- registry write
+    @app.post("/api/registry/add")
+    async def registry_add(
+        key: str,
+        repo: str,
+        file: str,
+        label: str | None = None,
+        download: bool = True,
+        inherit_from: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a probed quant to the registry, and optionally fetch it.
+
+        The entry is derived from a fresh probe rather than from user input, so
+        architecture, size and the presence of a speculative-decoding head are
+        read off the file itself instead of being asserted.
+        """
+        hr: State = app.state.hr
+        cards = hr.gpus()
+        free_vram = sum(g.memory_free_mib for g in cards) if cards else None
+
+        try:
+            analysis = await gguf_mod.probe_remote(repo, file, free_vram_mib=free_vram)
+        except gguf_mod.GgufError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            reg = registry_mod.load(settings.registry_path)
+        except registry_mod.RegistryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        # Where to put the weights: alongside the other models, in a directory
+        # named for this entry.
+        existing = next(iter(reg.models.values()), None)
+        if existing is None:
+            raise HTTPException(
+                status_code=400,
+                detail="the registry has no existing entry to infer a weights directory from",
+            )
+        weights_root = Path(existing.directory).parent
+        target_dir = weights_root / key
+
+        inherit = None
+        if inherit_from:
+            try:
+                inherit = reg.get(inherit_from)
+            except registry_mod.RegistryError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        entry = registry_mod.derive_entry(
+            key=key,
+            label=label or (analysis.name or file),
+            repo=repo,
+            filename=file,
+            directory=str(target_dir).replace("\\", "/"),
+            size_gib=analysis.size_gib or 0.0,
+            architecture=analysis.architecture,
+            has_mtp=analysis.has_mtp,
+            template=(reg.raw.get("models") or {}).get("_template"),
+            inherit_from=inherit,
+        )
+
+        try:
+            registry_mod.add_entry(settings.registry_path, key, entry)
+        except registry_mod.RegistryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        result: dict[str, Any] = {
+            "added": key,
+            "entry": entry,
+            "registry": str(settings.registry_path),
+            "backup": str(settings.registry_path) + ".bak",
+        }
+
+        if download:
+            d = hr.downloads.start(repo, file, target_dir / file)
+            result["download"] = d.to_dict()
+
+        return result
 
     # ---------------------------------------------------------------- frontend
     # Mounted LAST so every /api route above wins. A StaticFiles mount at "/"

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { getJSON } from "../api";
+import { getJSON, postJSON } from "../api";
 
 /**
  * Inspect a quant before downloading it.
@@ -40,13 +40,15 @@ interface RepoFile {
   size_gib: number;
 }
 
-export function ProbePanel() {
+export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
   const [repo, setRepo] = useState("");
   const [files, setFiles] = useState<RepoFile[]>([]);
   const [selected, setSelected] = useState("");
   const [result, setResult] = useState<ProbeResult | null>(null);
-  const [busy, setBusy] = useState<null | "list" | "probe">(null);
+  const [busy, setBusy] = useState<null | "list" | "probe" | "add">(null);
   const [error, setError] = useState<string | null>(null);
+  const [added, setAdded] = useState<string | null>(null);
+  const [key, setKey] = useState("");
 
   const listFiles = async () => {
     if (!repo.trim()) return;
@@ -71,7 +73,18 @@ export function ProbePanel() {
   const probe = async (filename: string) => {
     setBusy("probe");
     setError(null);
+    setAdded(null);
     setSelected(filename);
+    // Suggest a registry key from the filename: lowercase, no extension, and
+    // punctuation collapsed to hyphens so it is usable as a command argument.
+    setKey(
+      filename
+        .replace(/\.gguf$/i, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48),
+    );
     try {
       const d = await getJSON<ProbeResult>(
         `/api/probe?repo=${encodeURIComponent(repo.trim())}&file=${encodeURIComponent(filename)}`,
@@ -80,6 +93,26 @@ export function ProbePanel() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResult(null);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const addToRegistry = async () => {
+    setBusy("add");
+    setError(null);
+    try {
+      const params = new URLSearchParams({
+        key: key.trim(),
+        repo: repo.trim(),
+        file: selected,
+        download: "true",
+      });
+      const d = await postJSON<{ added: string }>(`/api/registry/add?${params}`);
+      setAdded(d.added);
+      onAdded?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -151,6 +184,32 @@ export function ProbePanel() {
               <div className="finding-detail">{f.detail}</div>
             </div>
           ))}
+
+          <div className="add-row">
+            <input
+              type="text"
+              value={key}
+              placeholder="registry key"
+              onChange={(e) => setKey(e.target.value)}
+              aria-label="Registry key for this model"
+            />
+            <button
+              disabled={busy !== null || !key.trim() || added !== null}
+              onClick={() => void addToRegistry()}
+            >
+              {busy === "add" ? "Adding…" : added ? "Added" : "Add to registry & download"}
+            </button>
+          </div>
+          {added && (
+            <div className="finding good">
+              <div className="finding-title">Added as {added}</div>
+              <div className="finding-detail">
+                Downloading now &mdash; see below. The entry is marked{" "}
+                <strong>not measured</strong>: its settings are defaults or inherited, never
+                observed on this file. Benchmark it before trusting the numbers.
+              </div>
+            </div>
+          )}
 
           <div className="families">
             {Object.entries(result.families).map(([family, counts]) => (
