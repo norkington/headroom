@@ -7,8 +7,9 @@ run a 27B on two 12 GB cards: knowing how much VRAM you have left, which card is
 which, whether a quant is worth downloading, and what has to stop before you can
 start something else.
 
-> **Status: early.** The backend is under construction and the API is not stable
-> yet. NVIDIA-only for now.
+> **Status: early.** The backend works and is verified end to end on real
+> hardware; the web frontend does not exist yet, so today this is an HTTP API.
+> The API is not stable. NVIDIA-only for now.
 
 ---
 

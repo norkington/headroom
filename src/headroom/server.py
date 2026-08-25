@@ -59,9 +59,19 @@ class ServerState:
     def status(self) -> str:
         """`running` | `loading` | `stopped` | `orphaned`.
 
-        `loading` matters: a large model takes tens of seconds between the
-        process existing and the port answering, and reporting that as `stopped`
-        invites the user to start a second one.
+        `loading` matters, and more than it first appears. Two separate gaps
+        open during startup, measured on a 15.4 GiB model:
+
+        - the process exists but nothing answers at all (~0-10 s), and
+        - **`/health` answers while `/props` still does not** (~10-25 s).
+
+        That second gap is the trap. Anything that waits on `/health` alone will
+        conclude the server is ready and then read back a null model and a null
+        context length. Readiness here therefore means `/props` answered, which
+        is why `reachable` is set from that endpoint and not from `/health`.
+
+        Reporting either gap as `stopped` would invite the user to start a
+        second server, and two of these do not fit in memory at once.
 
         `orphaned` means the port answers but no matching process was found --
         typically something else is on that port.
