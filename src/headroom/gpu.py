@@ -132,16 +132,16 @@ class NvmlBackend:
             # Every field below the memory numbers is best-effort. Consumer cards,
             # WSL and older drivers omit some of them, and a missing power reading
             # must not take down the whole telemetry stream.
-            util = _try(lambda: n.nvmlDeviceGetUtilizationRates(handle).gpu)
-            power = _try(lambda: n.nvmlDeviceGetPowerUsage(handle) / 1000.0)
-            temp = _try(lambda: n.nvmlDeviceGetTemperature(handle, n.NVML_TEMPERATURE_GPU))
-            width = _try(lambda: n.nvmlDeviceGetCurrPcieLinkWidth(handle))
+            util = _try(lambda h=handle: n.nvmlDeviceGetUtilizationRates(h).gpu)
+            power = _try(lambda h=handle: n.nvmlDeviceGetPowerUsage(h) / 1000.0)
+            temp = _try(lambda h=handle: n.nvmlDeviceGetTemperature(h, n.NVML_TEMPERATURE_GPU))
+            width = _try(lambda h=handle: n.nvmlDeviceGetCurrPcieLinkWidth(h))
 
             name = n.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
                 name = name.decode()
 
-            bus_id = _try(lambda: n.nvmlDeviceGetPciInfo(handle).busId) or ""
+            bus_id = _try(lambda h=handle: n.nvmlDeviceGetPciInfo(h).busId) or ""
             if isinstance(bus_id, bytes):
                 bus_id = bus_id.decode()
 
@@ -253,12 +253,12 @@ def resolve_cuda_mapping(llama_server_exe: str | Path, gpus: list[Gpu]) -> CudaM
         total = int(m.group("total"))
 
         hit = None
-        for pos, (nvml_pos, gpu) in enumerate(remaining):
+        for pos, (_, gpu) in enumerate(remaining):
             if gpu.name.strip() == name and abs(gpu.memory_total_mib - total) <= 64:
                 hit = pos
                 break
         if hit is None:
-            for pos, (nvml_pos, gpu) in enumerate(remaining):
+            for pos, (_, gpu) in enumerate(remaining):
                 if name in gpu.name or gpu.name in name:
                     hit = pos
                     break
@@ -266,7 +266,7 @@ def resolve_cuda_mapping(llama_server_exe: str | Path, gpus: list[Gpu]) -> CudaM
             unmatched.append(f"CUDA{cuda_idx}={name}")
             continue
 
-        nvml_pos, gpu = remaining.pop(hit)
+        _, gpu = remaining.pop(hit)
         mapping[cuda_idx] = gpu.nvml_index
         gpu.cuda_index = cuda_idx
 
