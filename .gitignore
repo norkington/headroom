@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+web/dist/
+*.local
+
+# Headroom runtime state. Config lives in %LOCALAPPDATA%, never in the repo and
+# never under Documents -- Controlled Folder Access silently blocks writes there.
+*.log
+.env
