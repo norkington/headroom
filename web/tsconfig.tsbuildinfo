@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/usetelemetry.ts","./src/components/gpucard.tsx","./src/components/modellist.tsx","./src/components/serverpanel.tsx"],"version":"5.9.3"}

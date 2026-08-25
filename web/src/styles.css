@@ -1,0 +1,459 @@
+/*
+ * Headroom's visual language.
+ *
+ * This is a dashboard, so the craft goes into information design rather than
+ * typography for its own sake: state must read at a glance, before any number
+ * is parsed.
+ *
+ * The accent is a cool steel blue and the semantic colours own the warm end
+ * (green / amber / red). That separation is deliberate — if the accent were
+ * amber, a "tight" card would be indistinguishable from ordinary branding, and
+ * the one signal the app exists to deliver would blend into the furniture.
+ *
+ * Dark-first, because this is a panel people leave open on a second screen, but
+ * light is fully designed rather than an inversion.
+ */
+
+:root {
+  --ground: #0d131c;
+  --surface: #141c28;
+  --surface-2: #1b2533;
+  --raised: #222e3e;
+  --ink: #e7edf5;
+  --ink-2: #a4b1c3;
+  --ink-3: #6e7c8e;
+  --rule: #253040;
+  --rule-2: #33404f;
+
+  --accent: #4fa8c7;
+  --accent-dim: #17323d;
+
+  --ok: #52b98c;
+  --ok-bg: #14261f;
+  --tight: #e3a445;
+  --tight-bg: #2a2013;
+  --critical: #e06b5c;
+  --critical-bg: #2a1815;
+
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Consolas", monospace;
+  --sans: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ground: #f2f5f9;
+    --surface: #ffffff;
+    --surface-2: #e8edf4;
+    --raised: #dde4ee;
+    --ink: #111823;
+    --ink-2: #46566b;
+    --ink-3: #78869a;
+    --rule: #d3dae5;
+    --rule-2: #bcc7d6;
+
+    --accent: #1d6f8c;
+    --accent-dim: #dceaf1;
+
+    --ok: #1f6a4a;
+    --ok-bg: #ddeee5;
+    --tight: #8a5d0c;
+    --tight-bg: #f7ead2;
+    --critical: #9d3f34;
+    --critical-bg: #f6e2df;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 24px 80px;
+}
+
+/* ---------------------------------------------------------------- header */
+.masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 26px;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.masthead .sub {
+  color: var(--ink-3);
+  font-size: 0.85rem;
+  margin-top: 2px;
+}
+
+/* The connection indicator is deliberately prominent. Stale data presented
+   confidently is the failure mode this whole app must avoid. */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 5px 11px;
+  border-radius: 3px;
+  border: 1px solid var(--rule-2);
+  background: var(--surface);
+}
+.conn .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.conn.live .dot {
+  background: var(--ok);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.conn.live {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.conn.lost .dot {
+  background: var(--critical);
+}
+.conn.lost {
+  color: var(--critical);
+  border-color: var(--critical);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conn.live .dot { animation: none; }
+}
+
+/* ---------------------------------------------------------------- sections */
+section {
+  margin-bottom: 32px;
+}
+
+h2 {
+  font-size: 0.76rem;
+  font-family: var(--mono);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+  margin: 0 0 12px;
+}
+
+/* ---------------------------------------------------------------- gpu cards */
+.gpu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.gpu {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 16px 18px 18px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* A severity stripe encodes state in FORM, not only colour -- it still reads
+   for anyone who cannot distinguish the hues. */
+.gpu::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ok);
+}
+.gpu.tight::before { background: var(--tight); }
+.gpu.critical::before { background: var(--critical); }
+
+.gpu-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.gpu-name {
+  font-weight: 600;
+  font-size: 0.98rem;
+}
+
+.cuda-tag {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 2px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.free-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 4px;
+}
+.free-figure .value {
+  font-family: var(--mono);
+  font-size: 1.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+.free-figure .unit {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.state-ok .value { color: var(--ok); }
+.state-tight .value { color: var(--tight); }
+.state-critical .value { color: var(--critical); }
+
+.state-pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 2px;
+  margin-bottom: 12px;
+}
+.state-ok .state-pill { background: var(--ok-bg); color: var(--ok); }
+.state-tight .state-pill { background: var(--tight-bg); color: var(--tight); }
+.state-critical .state-pill { background: var(--critical-bg); color: var(--critical); }
+
+.meter {
+  height: 7px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 12px;
+  display: flex;
+}
+.meter .used {
+  background: var(--accent);
+  transition: width 0.45s ease;
+}
+.meter.tight .used { background: var(--tight); }
+.meter.critical .used { background: var(--critical); }
+@media (prefers-reduced-motion: reduce) {
+  .meter .used { transition: none; }
+}
+
+.gpu-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.gpu-stats div {
+  font-size: 0.86rem;
+}
+.gpu-stats .k {
+  display: block;
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 1px;
+}
+
+/* ---------------------------------------------------------------- notice */
+.notice {
+  border: 1px solid var(--tight);
+  background: var(--tight-bg);
+  border-left-width: 3px;
+  border-radius: 0 3px 3px 0;
+  padding: 12px 15px;
+  margin-bottom: 18px;
+  font-size: 0.9rem;
+}
+.notice strong { color: var(--tight); }
+.notice code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: rgba(127, 127, 127, 0.16);
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+/* ---------------------------------------------------------------- server */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 16px 18px;
+}
+
+.server-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.server-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, max-content));
+  gap: 8px 26px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.88rem;
+}
+.server-facts .k {
+  display: block;
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.status-badge {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 2px;
+}
+.status-running { background: var(--ok-bg); color: var(--ok); }
+.status-loading { background: var(--tight-bg); color: var(--tight); }
+.status-stopped { background: var(--surface-2); color: var(--ink-3); }
+.status-orphaned { background: var(--critical-bg); color: var(--critical); }
+
+.actions { display: flex; gap: 9px; flex-wrap: wrap; }
+
+button {
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  font-weight: 550;
+  padding: 7px 15px;
+  border-radius: 3px;
+  border: 1px solid var(--rule-2);
+  background: var(--surface-2);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.13s, border-color 0.13s;
+}
+button:hover:not(:disabled) { background: var(--raised); border-color: var(--accent); }
+button:disabled { opacity: 0.42; cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(--critical); }
+
+.error-line {
+  margin-top: 12px;
+  padding: 9px 13px;
+  border-left: 3px solid var(--critical);
+  background: var(--critical-bg);
+  color: var(--ink);
+  font-size: 0.87rem;
+  border-radius: 0 3px 3px 0;
+}
+
+/* ---------------------------------------------------------------- models */
+.model {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 15px 17px;
+  margin-bottom: 11px;
+}
+.model-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.model-name { font-weight: 600; }
+.model-meta {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  margin-top: 3px;
+}
+.tag {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  margin-left: 6px;
+}
+.tag.installed { background: var(--ok-bg); color: var(--ok); }
+.tag.missing { background: var(--surface-2); color: var(--ink-3); }
+.tag.inherited { background: var(--tight-bg); color: var(--tight); }
+
+.measured-row {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+}
+.measured-row .k {
+  display: block;
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.empty {
+  color: var(--ink-3);
+  font-style: italic;
+  padding: 22px;
+  text-align: center;
+  border: 1px dashed var(--rule-2);
+  border-radius: 4px;
+}
