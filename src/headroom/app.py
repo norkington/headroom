@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import gguf as gguf_mod
 from . import gpu as gpu_mod
 from . import registry as registry_mod
 from . import server as server_mod
@@ -297,6 +298,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Loading a large model takes tens of seconds and blocking the HTTP
             # request for that long would just time out somewhere unhelpful.
             "note": "loading; poll /api/server until status is 'running'",
+        }
+
+    # ---------------------------------------------------------------- probe
+    @app.get("/api/hf/files")
+    async def hf_files(repo: str) -> dict[str, Any]:
+        """List the GGUF files in a HuggingFace repository."""
+        try:
+            files = await gguf_mod.list_repo_files(repo)
+        except gguf_mod.GgufError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"could not reach the hub: {exc}") from exc
+        return {"repo": repo, "files": files}
+
+    @app.get("/api/probe")
+    async def probe_gguf(repo: str | None = None, file: str | None = None, path: str | None = None):
+        """Inspect a GGUF's tensor table without downloading the weights.
+
+        Judged against **live free VRAM** where telemetry is available, because
+        a size in gibibytes only means something relative to what this machine
+        actually has spare right now.
+        """
+        hr: State = app.state.hr
+        cards = hr.gpus()
+        free_vram = sum(g.memory_free_mib for g in cards) if cards else None
+
+        try:
+            if path:
+                analysis = gguf_mod.probe_local(path, free_vram_mib=free_vram)
+            elif repo and file:
+                analysis = await gguf_mod.probe_remote(repo, file, free_vram_mib=free_vram)
+            else:
+                raise HTTPException(
+                    status_code=400, detail="provide either path, or both repo and file"
+                )
+        except gguf_mod.GgufError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"probe failed: {exc}") from exc
+
+        return {
+            "source": analysis.source,
+            "architecture": analysis.architecture,
+            "name": analysis.name,
+            "tensor_count": analysis.tensor_count,
+            "size_gib": analysis.size_gib,
+            "bytes_read": analysis.bytes_read,
+            "has_mtp": analysis.has_mtp,
+            "mtp_tensor_count": len(analysis.mtp_tensors),
+            "families": analysis.families,
+            "metadata": analysis.metadata,
+            "findings": [asdict(f) for f in analysis.findings],
+            "free_vram_mib": free_vram,
         }
 
     # ---------------------------------------------------------------- frontend

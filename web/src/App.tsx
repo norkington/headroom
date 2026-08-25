@@ -5,6 +5,7 @@ import { useTelemetry } from "./useTelemetry";
 import { GpuCard } from "./components/GpuCard";
 import { ServerPanel } from "./components/ServerPanel";
 import { ModelList } from "./components/ModelList";
+import { ProbePanel } from "./components/ProbePanel";
 
 interface GpuResponse {
   cuda_mapping: CudaMapping;
@@ -103,6 +104,11 @@ export function App() {
         ) : (
           <div className="empty">Waiting for server state…</div>
         )}
+      </section>
+
+      <section>
+        <h2>Inspect a quant before downloading it</h2>
+        <ProbePanel />
       </section>
 
       <section>

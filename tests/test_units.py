@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from headroom.gguf import GgufAnalysis
 from headroom.gpu import (
     _DEVICE_LINE,
     HEADROOM_CRITICAL_MIB,
@@ -258,3 +259,108 @@ def test_measured_provenance_is_distinguished(fake_registry: Path) -> None:
 
     entry.measured = {"status": "INHERITED from a sibling build"}
     assert entry.measured_on_this_file is False
+
+
+# ---------------------------------------------------------------- gguf analysis
+
+
+def _analysis(**kw) -> GgufAnalysis:
+    base = {"source": "test/model.gguf", "architecture": "demo", "tensor_count": 100}
+    base.update(kw)
+    return GgufAnalysis(**base)  # type: ignore[arg-type]
+
+
+def _titles(a) -> list[str]:
+    return [f.title for f in a.findings]
+
+
+def _level_of(a, needle: str) -> str:
+    from headroom.gguf import Finding
+
+    match: Finding = next(f for f in a.findings if needle.lower() in f.title.lower())
+    return match.level
+
+
+def test_missing_speculative_head_is_flagged() -> None:
+    from headroom.gguf import interpret
+
+    a = _analysis(mtp_tensors=[])
+    interpret(a)
+    assert _level_of(a, "speculative") == "caution"
+
+    b = _analysis(mtp_tensors=["blk.64.nextn.eh_proj"])
+    interpret(b)
+    assert _level_of(b, "speculative") == "good"
+
+
+def test_protected_recurrent_layers_read_as_good() -> None:
+    """The distinction the whole probe exists to draw."""
+    from headroom.gguf import interpret
+
+    protected = _analysis(families={"recurrent": {"F32": 192, "Q8_0": 96, "Q5_K": 33}})
+    interpret(protected)
+    assert _level_of(protected, "recurrent") == "good"
+
+    uniform = _analysis(families={"recurrent": {"F32": 192, "Q4_K": 144}})
+    interpret(uniform)
+    assert _level_of(uniform, "recurrent") == "caution"
+
+
+def test_f32_is_excluded_from_the_quantization_description() -> None:
+    """F32 tensors are norms and biases, and the ratios already exclude them.
+
+    Listing them in the prose would describe a distribution the adjacent numbers
+    do not refer to.
+    """
+    from headroom.gguf import interpret
+
+    a = _analysis(families={"recurrent": {"F32": 192, "Q4_K": 144}})
+    interpret(a)
+    detail = next(f.detail for f in a.findings if "recurrent" in f.title.lower())
+    assert "144xQ4_K" in detail
+    assert "F32" not in detail
+
+
+def test_aggressively_quantized_attention_is_flagged() -> None:
+    from headroom.gguf import interpret
+
+    a = _analysis(families={"attention": {"F32": 99, "IQ3_S": 96, "Q8_0": 34}})
+    interpret(a)
+    assert _level_of(a, "attention") == "caution"
+
+
+def test_fit_is_judged_against_real_free_vram() -> None:
+    """A size in gibibytes means nothing without the machine it has to fit on."""
+    from headroom.gguf import interpret
+
+    size = 15 * 1024**3
+
+    roomy = _analysis(file_size_bytes=size)
+    interpret(roomy, free_vram_mib=22000)
+    assert _level_of(roomy, "fit") == "good"
+
+    snug = _analysis(file_size_bytes=size)
+    interpret(snug, free_vram_mib=16000)
+    assert _level_of(snug, "leaves little") == "caution"
+
+    too_big = _analysis(file_size_bytes=size)
+    interpret(too_big, free_vram_mib=8000)
+    assert _level_of(too_big, "not fit") == "caution"
+
+
+def test_fit_is_silent_without_telemetry() -> None:
+    """With no GPU data, saying nothing beats guessing."""
+    from headroom.gguf import interpret
+
+    a = _analysis(file_size_bytes=15 * 1024**3)
+    interpret(a, free_vram_mib=None)
+    assert not any("fit" in t.lower() for t in _titles(a))
+
+
+def test_non_gguf_input_explains_the_likely_cause() -> None:
+    from io import BytesIO
+
+    from headroom.gguf import GgufError, parse
+
+    with pytest.raises(GgufError, match="gated"):
+        parse(BytesIO(b"<html>401 Unauthorized</html>"), source="x")

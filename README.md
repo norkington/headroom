@@ -36,7 +36,8 @@ the model say" but:
   is wasted. Headroom reconciles them against llama.cpp's own `--list-devices`
   and says so loudly when they differ.
 
-- **Is this quant worth 15 GiB of download?** Two builds of the same model at the
+- **Is this quant worth 15 GiB of download?** *(implemented — paste a repo, pick
+  a file, get an answer in seconds)* Two builds of the same model at the
   same file size can differ a lot in quality, and the difference is visible only
   in the tensor table. On hybrid architectures (Qwen3.5+ and friends) most blocks
   are recurrent; quantization error in those **accumulates with context depth**,
