@@ -13,6 +13,9 @@ build/
 node_modules/
 web/dist/
 *.local
+# TypeScript incremental build cache -- generated, machine-specific, and it
+# churns on every build.
+*.tsbuildinfo
 
 # Headroom runtime state. Config lives in %LOCALAPPDATA%, never in the repo and
 # never under Documents -- Controlled Folder Access silently blocks writes there.
