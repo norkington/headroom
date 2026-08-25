@@ -1,5 +1,7 @@
 # Headroom
 
+[![CI](https://github.com/norkington/headroom/actions/workflows/ci.yml/badge.svg)](https://github.com/norkington/headroom/actions/workflows/ci.yml)
+
 **An operations console for running large language models on constrained consumer GPUs.**
 
 Not another chat UI. Headroom is for the part that actually goes wrong when you
@@ -7,9 +9,8 @@ run a 27B on two 12 GB cards: knowing how much VRAM you have left, which card is
 which, whether a quant is worth downloading, and what has to stop before you can
 start something else.
 
-> **Status: early.** The backend works and is verified end to end on real
-> hardware; the web frontend does not exist yet, so today this is an HTTP API.
-> The API is not stable. NVIDIA-only for now.
+> **Status: early.** Working end to end on real hardware, but the API is not
+> stable yet. NVIDIA-only for now.
 
 ---
 
@@ -75,14 +76,45 @@ on the exact artifact in front of you, it says so.
 - An NVIDIA GPU with a working driver (NVML)
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) built with `llama-server`
 
-## Development
+## Running it
 
 ```bash
 git clone https://github.com/norkington/headroom
 cd headroom
 uv venv
 uv pip install -e ".[dev]"
+
+cd web && npm install && npm run build && cd ..
+
+headroom
 ```
+
+That serves the UI and the API from a **single process** on
+<http://127.0.0.1:7315>. The frontend builds into `src/headroom/static/`, which
+is what makes it ship inside the wheel rather than being left behind by `pip`.
+
+If you skip the frontend build, the API still works and the root route says so
+rather than returning a bare 404.
+
+### Working on the frontend
+
+```bash
+npm run dev    # in web/ -- port 7316, proxies /api to the backend on 7315
+```
+
+Run `headroom` alongside it for the API.
+
+### Tests
+
+```bash
+uv run pytest
+uv run ruff check src tests
+```
+
+The suite is in two halves. `test_units.py` is portable and runs anywhere.
+`test_argv_parity.py` checks Headroom's generated command line against a real
+shell launcher's own dry-run output, so it needs a local llama.cpp install and
+skips cleanly without one.
 
 ## Licence
 

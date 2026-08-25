@@ -40,6 +40,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/headroom"]
+# The built frontend lives inside the package so it ships in the wheel. It is
+# gitignored (generated), so source builds without a prior `npm run build` will
+# simply have no UI -- the server says so rather than 404ing.
+artifacts = ["src/headroom/static/**"]
 
 [tool.ruff]
 line-length = 100

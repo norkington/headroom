@@ -1,0 +1,260 @@
+"""Portable unit tests.
+
+These run anywhere — no GPU, no llama.cpp, no local registry — which is the
+point. `test_argv_parity.py` covers the contract that matters most, but it can
+only run on a machine with the real shell launcher installed, so in CI it skips.
+A pipeline whose only green signal is "lint passed and everything skipped" is
+decoration, not evidence.
+
+So these exercise the actual decision logic against synthetic inputs: the
+headroom grading, the CUDA-order reconciliation, the server state machine, and
+the argv builder's guard rails.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from headroom.gpu import (
+    _DEVICE_LINE,
+    HEADROOM_CRITICAL_MIB,
+    HEADROOM_TIGHT_MIB,
+    CudaMapping,
+    Gpu,
+    order_differs,
+)
+from headroom.registry import RegistryError, build_argv, load
+from headroom.server import ServerState
+
+
+def make_gpu(**kw) -> Gpu:
+    base = {
+        "nvml_index": 0,
+        "name": "NVIDIA GeForce RTX 4070 SUPER",
+        "memory_total_mib": 12282,
+        "memory_used_mib": 1000,
+        "memory_free_mib": 11282,
+    }
+    base.update(kw)
+    return Gpu(**base)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------- headroom
+
+
+@pytest.mark.parametrize(
+    ("free", "expected"),
+    [
+        (0, "critical"),
+        (HEADROOM_CRITICAL_MIB - 1, "critical"),
+        (HEADROOM_CRITICAL_MIB, "tight"),
+        (HEADROOM_TIGHT_MIB - 1, "tight"),
+        (HEADROOM_TIGHT_MIB, "ok"),
+        (11282, "ok"),
+    ],
+)
+def test_headroom_grading_boundaries(free: int, expected: str) -> None:
+    assert make_gpu(memory_free_mib=free).headroom_state == expected
+
+
+def test_grading_is_per_card_not_aggregate() -> None:
+    """The premise of the project in one assertion.
+
+    Two cards can total plenty of free memory while one of them is nearly out.
+    Grading on the total would report this pair as healthy.
+    """
+    roomy = make_gpu(nvml_index=0, memory_free_mib=2200)
+    starved = make_gpu(nvml_index=1, name="NVIDIA GeForce RTX 3060", memory_free_mib=400)
+
+    total_free = roomy.memory_free_mib + starved.memory_free_mib
+    assert total_free > HEADROOM_TIGHT_MIB, "the aggregate looks fine"
+    assert roomy.headroom_state == "ok"
+    assert starved.headroom_state == "critical", "but one card is nearly out"
+
+
+def test_label_never_invents_a_cuda_index() -> None:
+    """An unresolved mapping must not be presented as CUDA0.
+
+    Guessing here would be worse than admitting ignorance: the whole reason this
+    mapping exists is that the obvious assumption is often wrong.
+    """
+    unmapped = make_gpu()
+    assert "CUDA" not in unmapped.label
+    assert "nvml 0" in unmapped.label
+
+    unmapped.cuda_index = 1
+    assert "CUDA1" in unmapped.label
+
+
+# ---------------------------------------------------------------- cuda order
+
+
+def test_device_line_parses_llama_cpp_output() -> None:
+    sample = """
+Available devices:
+  CUDA0: NVIDIA GeForce RTX 4070 SUPER (12281 MiB, 11069 MiB free)
+  CUDA1: NVIDIA GeForce RTX 3060 (12287 MiB, 11253 MiB free)
+"""
+    matches = list(_DEVICE_LINE.finditer(sample))
+    assert [m.group("idx") for m in matches] == ["0", "1"]
+    assert matches[0].group("name") == "NVIDIA GeForce RTX 4070 SUPER"
+    assert matches[1].group("total") == "12287"
+
+
+def test_order_differs_detects_the_reversal() -> None:
+    """The condition that makes `-dev CUDA0` and `nvidia-smi -i 0` disagree."""
+    same = CudaMapping(cuda_to_nvml={0: 0, 1: 1})
+    reversed_ = CudaMapping(cuda_to_nvml={0: 1, 1: 0})
+
+    assert order_differs(same) is False
+    assert order_differs(reversed_) is True
+
+
+def test_unresolved_mapping_is_not_treated_as_agreement() -> None:
+    """An empty mapping means "unknown", which must not read as "they agree"."""
+    empty = CudaMapping()
+    assert empty.resolved is False
+    assert order_differs(empty) is False  # nothing known, so nothing claimed
+
+
+# ---------------------------------------------------------------- server state
+
+
+def test_status_distinguishes_loading_from_stopped() -> None:
+    """Loading must not read as stopped, or the user starts a second server."""
+    assert ServerState().status == "stopped"
+    assert ServerState(running=True, pid=123).status == "loading"
+    assert ServerState(running=True, pid=123, reachable=True).status == "running"
+
+
+def test_status_orphaned_when_reachable_process_is_unknown() -> None:
+    """Something answers the port but no matching process was found."""
+    assert ServerState(running=True, pid=None).status == "orphaned"
+
+
+# ---------------------------------------------------------------- argv
+
+
+@pytest.fixture
+def fake_registry(tmp_path: Path) -> Path:
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "fake.gguf").write_bytes(b"GGUF")
+    (weights / "mmproj.gguf").write_bytes(b"GGUF")
+
+    doc = {
+        "default": "demo",
+        "models": {
+            "_template": {"label": "ignored"},
+            "demo": {
+                "label": "Demo Model",
+                "repo": "example/demo-GGUF",
+                "file": "fake.gguf",
+                "mmproj": "mmproj.gguf",
+                "dir": str(weights).replace("\\", "/"),
+                "size_gib": 1.0,
+                "arch": "demo-arch",
+                "serve": {
+                    "ctx": 8192,
+                    "ubatch": 512,
+                    "batch": 2048,
+                    "ngl": 99,
+                    "devices": "CUDA0,CUDA1",
+                    "split": "",
+                    "flash_attn": "on",
+                    "cache_type_k": "q8_0",
+                    "cache_type_v": "q8_0",
+                    "cache_ram": 32768,
+                    "parallel": 1,
+                    "mtp": True,
+                    "jinja": True,
+                    "chat_template_file": None,
+                    "sampling": {"temp": 1.0, "top_p": 0.95},
+                },
+                "vision": {
+                    "supported": True,
+                    "ctx": 4096,
+                    "split": "0.4,0.6",
+                    "image_min_tokens": 1024,
+                },
+                "measured": {"status": "MEASURED on this file"},
+                "verified": {},
+            },
+        },
+    }
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_template_entries_are_not_runnable(fake_registry: Path) -> None:
+    reg = load(fake_registry)
+    assert "_template" not in reg.models
+    assert reg.default == "demo"
+
+
+def test_argv_carries_the_registry_values(fake_registry: Path) -> None:
+    reg = load(fake_registry)
+    argv = build_argv(reg.get(), "llama-server")
+
+    def value_after(flag: str) -> str:
+        return argv[argv.index(flag) + 1]
+
+    assert value_after("--ctx-size") == "8192"
+    assert value_after("-ub") == "512"
+    assert value_after("-ctk") == "q8_0"
+    assert value_after("-dev") == "CUDA0,CUDA1"
+    assert value_after("--temp") == "1.0"
+    assert "--jinja" in argv
+    assert "--spec-type" in argv, "speculative decoding was enabled in the registry"
+    assert "--mmproj" not in argv, "vision was not requested"
+
+
+def test_vision_applies_its_own_operating_point(fake_registry: Path) -> None:
+    """Vision is a different profile, not a flag: it carries its own ctx and split."""
+    reg = load(fake_registry)
+    argv = build_argv(reg.get(), "llama-server", vision=True)
+
+    assert argv[argv.index("--ctx-size") + 1] == "4096", "vision ctx overrides the text default"
+    assert argv[argv.index("-ts") + 1] == "0.4,0.6"
+    assert "--mmproj" in argv
+    assert argv[argv.index("--image-min-tokens") + 1] == "1024"
+
+
+def test_explicit_override_beats_the_vision_profile(fake_registry: Path) -> None:
+    reg = load(fake_registry)
+    argv = build_argv(reg.get(), "llama-server", vision=True, overrides={"ctx": 16384})
+    assert argv[argv.index("--ctx-size") + 1] == "16384"
+
+
+def test_large_micro_batch_with_mtp_is_refused(fake_registry: Path) -> None:
+    reg = load(fake_registry)
+    with pytest.raises(RegistryError, match="micro-batch"):
+        build_argv(reg.get(), "llama-server", overrides={"ubatch": 2048})
+
+
+def test_split_device_count_mismatch_is_refused(fake_registry: Path) -> None:
+    reg = load(fake_registry)
+    with pytest.raises(RegistryError, match="ratio"):
+        build_argv(reg.get(), "llama-server", overrides={"split": "0.5,0.3,0.2"})
+
+
+def test_missing_model_file_is_reported_clearly(fake_registry: Path, tmp_path: Path) -> None:
+    reg = load(fake_registry)
+    entry = reg.get()
+    entry.file = "does-not-exist.gguf"
+    with pytest.raises(RegistryError, match="missing"):
+        build_argv(entry, "llama-server")
+
+
+def test_measured_provenance_is_distinguished(fake_registry: Path) -> None:
+    """Inherited numbers must not be indistinguishable from measured ones."""
+    reg = load(fake_registry)
+    entry = reg.get()
+    assert entry.measured_on_this_file is True
+
+    entry.measured = {"status": "INHERITED from a sibling build"}
+    assert entry.measured_on_this_file is False

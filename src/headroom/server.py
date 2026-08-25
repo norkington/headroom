@@ -250,7 +250,7 @@ def spawn_via_wmi(argv: list[str], log_path: Path) -> int:
     ps = (
         "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
         f"-Arguments @{{ CommandLine = '{command}' }}; "
-        "Write-Output \"$($r.ReturnValue) $($r.ProcessId)\""
+        'Write-Output "$($r.ReturnValue) $($r.ProcessId)"'
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],

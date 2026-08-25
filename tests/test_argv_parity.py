@@ -72,8 +72,13 @@ def test_argv_matches_shell_launcher() -> None:
 
     proc = subprocess.run(
         [
-            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-            "-File", str(LAUNCHER), "-DryRun",
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(LAUNCHER),
+            "-DryRun",
         ],
         capture_output=True,
         text=True,
@@ -84,7 +89,9 @@ def test_argv_matches_shell_launcher() -> None:
         (ln for ln in (proc.stdout or "").splitlines() if "llama-server" in ln.lower()),
         None,
     )
-    assert line, f"launcher produced no command line.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert line, (
+        f"launcher produced no command line.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 
     theirs = line.strip().split()
 

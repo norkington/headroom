@@ -27,8 +27,10 @@ export default defineConfig({
     },
   },
   build: {
-    // Built assets are served by the Python app, so they land where it looks.
-    outDir: "dist",
+    // Build INTO the Python package, not into web/dist. The backend serves the
+    // UI in production, and putting the output inside the package is what makes
+    // it ship in the wheel -- a separate web/dist would be left behind by pip.
+    outDir: "../src/headroom/static",
     emptyOutDir: true,
   },
 });
