@@ -499,6 +499,53 @@ async def probe_remote(
     ) from last_error
 
 
+# Multimodal projectors ship alongside the weights in the same repository and are
+# ordinary .gguf files, so they arrive mixed into the quant list. They are named
+# by a convention llama.cpp's own conversion tooling follows.
+PROJECTOR_MARKER = "mmproj"
+
+# Preferred projector precision, best first. f16 rather than f32 because a
+# projector is a few hundred MiB against a model's tens of gigabytes -- the extra
+# precision buys nothing measurable and the VRAM it costs comes straight out of
+# the context budget, which on a constrained box is the scarce thing. Quantized
+# projectors are last: the saving is small and image fidelity is what pays.
+_PROJECTOR_PRECISION = ("f16", "bf16", "f32", "q8_0")
+
+
+def is_projector(filename: str) -> bool:
+    """Whether this .gguf is a vision projector rather than model weights.
+
+    Matched on the filename because that is what the convention actually is.
+    Size would be a tempting proxy -- projectors are far smaller -- but a small
+    quant of a small model is smaller still, and mistaking weights for a
+    projector is worse than not detecting one.
+    """
+    return PROJECTOR_MARKER in filename.lower()
+
+
+def choose_projector(files: list[dict[str, Any]]) -> str | None:
+    """Pick the projector to pair with a model, or None if the repo has none.
+
+    A suggestion, not a decision -- the caller is expected to show it and let it
+    be changed. Repositories ship several precisions and which one is wanted is
+    a judgement about VRAM, not something a filename can settle.
+    """
+    projectors = [f for f in files if f.get("kind") == "projector"]
+    if not projectors:
+        return None
+
+    def rank(f: dict[str, Any]) -> tuple[int, float]:
+        name = f["filename"].lower()
+        for i, token in enumerate(_PROJECTOR_PRECISION):
+            if token in name:
+                return (i, -(f.get("size_bytes") or 0))
+        # Unrecognised precision sorts after the known ones, larger first, on the
+        # assumption that bigger means less quantized.
+        return (len(_PROJECTOR_PRECISION), -(f.get("size_bytes") or 0))
+
+    return min(projectors, key=rank)["filename"]
+
+
 async def list_repo_files(
     repo: str,
     *,
@@ -521,6 +568,7 @@ async def list_repo_files(
             "filename": s["rfilename"],
             "size_bytes": s.get("size"),
             "size_gib": round((s.get("size") or 0) / 1024**3, 3),
+            "kind": "projector" if is_projector(s["rfilename"]) else "model",
         }
         for s in payload.get("siblings", [])
         if s.get("rfilename", "").endswith(".gguf")

@@ -64,6 +64,25 @@ class ModelEntry:
         return Path(self.directory) / self.mmproj if self.mmproj else None
 
     @property
+    def vision_tuned(self) -> bool:
+        """Whether the vision profile is a measured operating point or just a flag.
+
+        `supported` only says a projector exists. Running vision at the text
+        context is usually too tight -- the projector's VRAM comes out of the
+        context budget -- so the two need telling apart at the moment someone
+        ticks the box, not at the moment the load fails.
+
+        Entries written before the `tuned` flag existed are judged by whether the
+        profile actually carries an operating point, so a hand-tuned registry does
+        not suddenly read as untuned.
+        """
+        if not self.vision.get("supported"):
+            return False
+        if "tuned" in self.vision:
+            return bool(self.vision["tuned"])
+        return bool(self.vision.get("ctx") or self.vision.get("split"))
+
+    @property
     def measured_on_this_file(self) -> bool:
         """Whether the numbers were measured on THIS artifact or inherited.
 
@@ -304,6 +323,7 @@ def derive_entry(
     has_mtp: bool,
     template: dict[str, Any] | None = None,
     inherit_from: ModelEntry | None = None,
+    mmproj: str | None = None,
 ) -> dict[str, Any]:
     """Build a registry entry from a probe result.
 
@@ -325,6 +345,15 @@ def derive_entry(
     ``mtp`` is the one setting derived from evidence rather than inherited: the
     probe read the tensor table, so whether a speculative-decoding head exists is
     a fact about this file, not a guess.
+
+    A ``mmproj`` marks the entry as vision-capable, because the projector exists
+    and that is a fact. It does **not** produce a tuned vision profile: the
+    projector's VRAM comes out of the context budget, so a usable profile means a
+    shorter context and often a different tensor split, and those are measurements
+    rather than deductions. Where none is inherited the profile is left with only
+    ``supported`` set, which `build_argv` will run at the text context -- correct
+    to attempt, likely to be too tight, and flagged as untuned so the user is not
+    surprised by it.
     """
     if inherit_from is not None and inherit_from.arch == architecture:
         serve = dict(inherit_from.serve)
@@ -353,17 +382,29 @@ def derive_entry(
         # scale with the micro-batch, so the two cannot be tuned independently.
         serve["ubatch"] = min(int(serve.get("ubatch", 512) or 512), 512)
 
+    why = [f"Added from a tensor-table probe of {repo}."]
+    if mmproj:
+        why.append(
+            f"Projector {mmproj!r} found in the same repository. Vision is marked supported; "
+            "its operating point is NOT tuned."
+        )
+        vision = dict(vision)
+        vision["supported"] = True
+        # Distinguishes "we know this loads at ctx 32768 with this split" from
+        # "a projector exists". Only the first is worth acting on.
+        vision["tuned"] = bool(vision.get("ctx") or vision.get("split"))
+
     return {
         "label": label,
         "repo": repo,
         "file": filename,
-        "mmproj": None,
+        "mmproj": mmproj,
         "dir": directory,
         "size_gib": round(size_gib, 3),
         "arch": architecture,
         "license": None,
         "uncensored": False,
-        "why_this_build": [f"Added from a tensor-table probe of {repo}."],
+        "why_this_build": why,
         "serve": serve,
         "vision": vision or {"supported": False},
         "measured": {"status": provenance},

@@ -45,6 +45,9 @@ the model say" but:
   Q8_0 will hold up at long context where an all-Q4_K build of identical size
   degrades. Headroom reads a remote GGUF's tensor table over a ranged request —
   tens of megabytes, not the whole file — so you can see that before committing.
+  Vision projectors are separated out of the file list rather than offered
+  alongside the quants: both are `.gguf`, and a projector picked as a model
+  fails at load rather than at the point you chose it.
 
 - **Is that throughput figure real, or inherited?** *(implemented — pick a
   model, start it, benchmark it)* An entry added through the UI arrives marked
@@ -86,6 +89,13 @@ observes a configuration, it does not get to change one. Within that block it
 replaces the figures it is the authority on and carries your own notes forward
 untouched, listing what it carried — so a hand-written comparison survives a
 run, and a stale figure from an older one does not.
+
+The same line runs through everything else Headroom writes. A model added with
+a projector is marked vision **supported**, because the projector exists and
+that is a fact — but not vision **tuned**, because a working vision profile
+means a shorter context and often a different tensor split, and those are
+measurements rather than deductions. The UI says which of the two you have at
+the moment you tick the box, not when the load fails.
 
 ## Requirements
 
