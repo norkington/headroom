@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import config as config_mod
 from . import downloads as downloads_mod
 from . import gguf as gguf_mod
 from . import gpu as gpu_mod
@@ -35,49 +36,54 @@ from . import server as server_mod
 log = logging.getLogger(__name__)
 
 
-def _env_path(name: str, default: str) -> Path:
-    """Read a path from the environment, tolerating stray whitespace.
-
-    A trailing space in an environment variable is easy to produce on Windows --
-    `set VAR=value && cmd` in cmd.exe captures the space before the `&&` -- and
-    it fails in a way that is almost invisible. Windows will happily open
-    ``"models.json "``, so the app reads the right file and looks correct, while
-    every path *derived* from it inherits the space: a backup written alongside
-    lands as ``models.json .bak`` instead of ``models.json.bak``.
-
-    Found exactly that way. Stripping costs nothing and removes the whole class.
-    """
-    return Path(os.environ.get(name, default).strip())
-
-
 @dataclass(slots=True)
 class Settings:
-    """Where things live. Every value is overridable by environment variable.
+    """Where things live, and how each location was decided.
 
-    Defaults point at the developer's own layout; nothing here is load-bearing
-    for correctness, only for convenience on first run.
+    Nothing here is hardcoded to one machine. Paths come from
+    :mod:`headroom.config`, which checks explicit arguments, then environment
+    variables, then a config file, then conventional install locations -- and
+    keeps a record of which of those answered, because "found nothing" and
+    "found the wrong thing" need different fixes and look the same from outside.
     """
 
-    registry_path: Path = field(
-        default_factory=lambda: _env_path("HEADROOM_REGISTRY", r"C:\AI\models\models.json")
-    )
-    llama_server: Path = field(
-        default_factory=lambda: _env_path(
-            "HEADROOM_LLAMA_SERVER",
-            r"C:\src\llama.cpp\build\bin\Release\llama-server.exe",
+    registry_path: Path
+    llama_server: Path | None
+    log_dir: Path
+    registry_resolution: config_mod.Resolution
+    llama_resolution: config_mod.Resolution
+    port: int = 8080
+    poll_interval: float = 1.0
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        registry: str | None = None,
+        llama_server: str | None = None,
+        create_registry: bool = True,
+        port: int = 8080,
+    ) -> Settings:
+        """Work out where everything is, creating a starter registry if needed.
+
+        `create_registry` defaults to true so a fresh clone has somewhere to put
+        its first model. An app that errors until the user reads the source is
+        not a working app.
+        """
+        reg = config_mod.resolve_registry(registry, create=create_registry)
+        llama = config_mod.resolve_llama_server(llama_server)
+        log_dir = Path(
+            (os.environ.get("HEADROOM_LOG_DIR") or "").strip() or (config_mod.data_dir() / "logs")
         )
-    )
-    log_dir: Path = field(
-        default_factory=lambda: _env_path(
-            "HEADROOM_LOG_DIR",
-            # Never under Documents: Controlled Folder Access silently blocks
-            # writes there on Windows, and a blocked write looks like a bug in
-            # whatever tried to log.
-            os.path.join(os.environ.get("LOCALAPPDATA", "."), "headroom", "logs"),
+        return cls(
+            registry_path=reg.path or (config_mod.data_dir() / "models.json"),
+            llama_server=llama.path if llama.exists else None,
+            log_dir=log_dir,
+            registry_resolution=reg,
+            llama_resolution=llama,
+            port=int((os.environ.get("HEADROOM_SERVER_PORT") or "").strip() or port),
+            poll_interval=float((os.environ.get("HEADROOM_POLL_SECONDS") or "").strip() or 1.0),
         )
-    )
-    port: int = int(os.environ.get("HEADROOM_SERVER_PORT", "8080"))
-    poll_interval: float = float(os.environ.get("HEADROOM_POLL_SECONDS", "1.0"))
 
 
 class State:
@@ -102,7 +108,15 @@ class State:
             return gpus
 
         if not self.mapping_resolved:
-            self.cuda_mapping = gpu_mod.resolve_cuda_mapping(self.settings.llama_server, gpus)
+            if self.settings.llama_server is None:
+                # Without llama.cpp there is no authoritative device order. Saying
+                # nothing is correct here -- guessing would be worse than a gap,
+                # because the guess is wrong on exactly the machines that matter.
+                self.cuda_mapping = gpu_mod.CudaMapping(
+                    warning="llama-server not found, so CUDA device indices are unresolved"
+                )
+            else:
+                self.cuda_mapping = gpu_mod.resolve_cuda_mapping(self.settings.llama_server, gpus)
             self.mapping_resolved = True
             if self.cuda_mapping.warning:
                 log.warning("CUDA mapping: %s", self.cuda_mapping.warning)
@@ -130,7 +144,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or Settings()
+    settings = settings or Settings.resolve()
     app = FastAPI(
         title="Headroom",
         description="Operations console for local LLM inference",
@@ -143,14 +157,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
         hr: State = app.state.hr
+        problems: list[str] = []
+        if not settings.registry_path.exists():
+            problems.append(
+                f"No model registry at {settings.registry_path}. Add a model through the UI, "
+                "or point Headroom at an existing registry with --registry."
+            )
+        if settings.llama_server is None:
+            problems.append(
+                "llama-server was not found. Put it on your PATH, or pass "
+                "--llama-server /path/to/llama-server. Serving and CUDA device "
+                "identification need it; everything else works without it."
+            )
         return {
             "ok": True,
             "version": "0.1.0",
             "gpu_backend_available": hr.backend.available(),
             "registry": str(settings.registry_path),
             "registry_exists": settings.registry_path.exists(),
-            "llama_server": str(settings.llama_server),
-            "llama_server_exists": settings.llama_server.exists(),
+            "registry_source": settings.registry_resolution.as_dict(),
+            "llama_server": str(settings.llama_server) if settings.llama_server else None,
+            "llama_server_exists": settings.llama_server is not None,
+            "llama_server_source": settings.llama_resolution.as_dict(),
+            "config_file": str(config_mod.config_file()),
+            # Surfaced so the UI can tell a fresh install what it still needs,
+            # instead of appearing broken.
+            "problems": problems,
         }
 
     # ---------------------------------------------------------------- gpus
@@ -280,6 +312,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     f"a server is already {existing.status} on port {settings.port} "
                     f"(pid {existing.pid}). Stop it before starting another — "
                     "two models will not fit."
+                ),
+            )
+
+        if settings.llama_server is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "llama-server was not found, so there is nothing to start. Put it on "
+                    "your PATH or pass --llama-server."
                 ),
             )
 

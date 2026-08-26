@@ -33,15 +33,29 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    settings = Settings()
-    if args.registry:
-        settings.registry_path = type(settings.registry_path)(args.registry)
-    if args.llama_server:
-        settings.llama_server = type(settings.llama_server)(args.llama_server)
-    settings.port = args.server_port
+    settings = Settings.resolve(
+        registry=args.registry,
+        llama_server=args.llama_server,
+        port=args.server_port,
+    )
+
+    print(f"\n  Headroom -> http://127.0.0.1:{args.port}")
+    print(f"  registry     {settings.registry_path}")
+    print(f"               via {settings.registry_resolution.source}")
+    if settings.llama_server:
+        print(f"  llama-server {settings.llama_server}")
+        print(f"               via {settings.llama_resolution.source}")
+    else:
+        # Said at startup, not only in the API. Someone who just cloned this
+        # should learn what is missing here rather than by clicking a button in
+        # the browser and wondering why nothing happened.
+        print("  llama-server NOT FOUND")
+        print("               Put it on your PATH, or pass --llama-server <path>.")
+        print("               Probing, telemetry and the registry work without it;")
+        print("               starting a model does not.")
+    print()
 
     app = create_app(settings)
-    print(f"\n  Headroom -> http://127.0.0.1:{args.port}\n")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 

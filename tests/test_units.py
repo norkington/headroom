@@ -521,8 +521,86 @@ def test_env_paths_tolerate_trailing_whitespace(monkeypatch) -> None:
     from headroom.app import Settings
 
     monkeypatch.setenv("HEADROOM_REGISTRY", "C:/models/models.json   ")
-    settings = Settings()
+    settings = Settings.resolve(create_registry=False)
 
     assert str(settings.registry_path).endswith("models.json")
     derived = settings.registry_path.with_suffix(settings.registry_path.suffix + ".bak")
     assert derived.name == "models.json.bak"
+
+
+# ---------------------------------------------------------------- discovery
+
+
+def test_explicit_argument_beats_the_environment(monkeypatch, tmp_path: Path) -> None:
+    from headroom.config import resolve_registry
+
+    monkeypatch.setenv("HEADROOM_REGISTRY", str(tmp_path / "from-env.json"))
+    r = resolve_registry(str(tmp_path / "explicit.json"))
+    assert r.path is not None and r.path.name == "explicit.json"
+    assert r.source == "argument"
+
+
+def test_environment_beats_discovery(monkeypatch, tmp_path: Path) -> None:
+    from headroom.config import resolve_registry
+
+    target = tmp_path / "from-env.json"
+    target.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_REGISTRY", str(target))
+    r = resolve_registry()
+    assert r.path == target
+    assert r.source == "HEADROOM_REGISTRY"
+    assert r.exists
+
+
+def test_a_fresh_machine_gets_a_usable_registry(monkeypatch, tmp_path: Path) -> None:
+    """The whole point of this module.
+
+    With nothing configured and nothing installed, Headroom must still come up
+    with somewhere to put a model. An app that errors until the user reads the
+    source is not a working app.
+    """
+    from headroom.config import resolve_registry
+    from headroom.registry import load
+
+    monkeypatch.delenv("HEADROOM_REGISTRY", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    r = resolve_registry(create=True)
+    assert r.exists, "no registry was created"
+    assert r.path is not None
+
+    # And it must be loadable, not merely present.
+    reg = load(r.path)
+    assert reg.models == {}, "a starter registry has no real models, only a template"
+
+
+def test_a_missing_llama_server_is_reported_not_guessed(monkeypatch, tmp_path: Path) -> None:
+    """Reporting nothing beats inventing a path that does not exist."""
+    from headroom.config import resolve_llama_server
+
+    monkeypatch.delenv("HEADROOM_LLAMA_SERVER", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    r = resolve_llama_server()
+    if r.exists:
+        pytest.skip("a real llama-server is installed in a conventional location")
+    assert r.path is None, "a not-found result must not carry a fabricated path"
+    assert r.source == "not found"
+    assert r.searched, "the search locations should be reported so the user can fix it"
+
+
+def test_an_empty_registry_says_so_rather_than_reporting_a_typo(tmp_path: Path) -> None:
+    """A fresh install is not a mistyped model name."""
+    from headroom.config import write_starter_registry
+    from headroom.registry import RegistryError, load
+
+    path = tmp_path / "models.json"
+    write_starter_registry(path)
+    reg = load(path)
+
+    with pytest.raises(RegistryError, match="no models in the registry yet"):
+        reg.get()

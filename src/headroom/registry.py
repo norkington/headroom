@@ -81,9 +81,22 @@ class Registry:
     raw: dict[str, Any]
 
     def get(self, key: str | None = None) -> ModelEntry:
+        # An empty registry is a fresh install, not a typo. Saying "unknown
+        # model ''" to someone who has not added one yet describes the symptom
+        # and hides the cause.
+        if not self.models:
+            raise RegistryError(
+                f"no models in the registry yet ({self.path}). Probe a quant and add it, "
+                "or add an entry by hand."
+            )
         key = key or self.default
+        if not key:
+            raise RegistryError(
+                f"no default model is set in {self.path}. Pass a model name, or set "
+                '"default" in the registry.'
+            )
         if key not in self.models:
-            known = ", ".join(self.models) or "(none)"
+            known = ", ".join(self.models)
             raise RegistryError(f"unknown model {key!r}. Known: {known}")
         return self.models[key]
 

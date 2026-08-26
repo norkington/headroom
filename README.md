@@ -97,6 +97,38 @@ is what makes it ship inside the wheel rather than being left behind by `pip`.
 If you skip the frontend build, the API still works and the root route says so
 rather than returning a bare 404.
 
+### It should work with no configuration
+
+On first run Headroom finds `llama-server` on your `PATH` (or in a conventional
+build location) and creates an empty model registry under your platform's data
+directory. Nothing needs editing before it starts.
+
+Where each path came from is reported at startup and by `/api/health`, because
+"found nothing" and "found the wrong thing" need different fixes and look
+identical otherwise. Anything it gets wrong can be overridden, highest priority
+first:
+
+```bash
+headroom --registry /path/to/models.json --llama-server /path/to/llama-server
+```
+
+```bash
+HEADROOM_REGISTRY=... HEADROOM_LLAMA_SERVER=... headroom
+```
+
+Or persist it in `config.toml`, in your platform config directory (the exact
+path is printed by `/api/health`):
+
+```toml
+[paths]
+registry = "/path/to/models.json"
+llama_server = "/path/to/llama-server"
+```
+
+Without `llama-server`, probing, telemetry and registry editing all still work
+— only starting a model needs it, and the app says so rather than failing
+silently.
+
 ### Working on the frontend
 
 ```bash
