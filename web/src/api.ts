@@ -80,7 +80,14 @@ export interface ModelSummary {
   measured_on_this_file: boolean;
 }
 
-export type BenchStatus = "queued" | "running" | "complete" | "failed" | "cancelled";
+export type BenchStatus =
+  | "queued"
+  | "running"
+  | "complete"
+  | "failed"
+  | "cancelled"
+  /** Headroom stopped mid-run. An attempt, never a result. */
+  | "interrupted";
 
 export interface BenchTaskResult {
   decode_tok_s: number | null;
@@ -117,6 +124,8 @@ export interface BenchInfo {
   /** Whether the figures were written back into models.json. */
   written: boolean;
   error: string | null;
+  started_at: number;
+  finished_at: number | null;
   elapsed_seconds: number;
 }
 

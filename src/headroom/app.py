@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ from . import gguf as gguf_mod
 from . import gpu as gpu_mod
 from . import registry as registry_mod
 from . import server as server_mod
+from .store import JsonStore
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,11 @@ class Settings:
     log_dir: Path
     registry_resolution: config_mod.Resolution
     llama_resolution: config_mod.Resolution
+    # Records of work Headroom itself did -- downloads and benchmark runs. Kept
+    # apart from the registry, which is the operator's file and shared with
+    # their scripts: nothing in here is a setting, and losing all of it costs a
+    # transfer's progress and some history, never a configuration.
+    state_dir: Path = field(default_factory=lambda: config_mod.data_dir() / "state")
     port: int = 8080
     poll_interval: float = 1.0
 
@@ -76,10 +82,15 @@ class Settings:
         log_dir = Path(
             (os.environ.get("HEADROOM_LOG_DIR") or "").strip() or (config_mod.data_dir() / "logs")
         )
+        state_dir = Path(
+            (os.environ.get("HEADROOM_STATE_DIR") or "").strip()
+            or (config_mod.data_dir() / "state")
+        )
         return cls(
             registry_path=reg.path or (config_mod.data_dir() / "models.json"),
             llama_server=llama.path if llama.exists else None,
             log_dir=log_dir,
+            state_dir=state_dir,
             registry_resolution=reg,
             llama_resolution=llama,
             port=int((os.environ.get("HEADROOM_SERVER_PORT") or "").strip() or port),
@@ -88,16 +99,27 @@ class Settings:
 
 
 class State:
-    """Process-wide state. Telemetry hardware handles, and the cached CUDA map."""
+    """Process-wide state. Telemetry hardware handles, and the cached CUDA map.
+
+    Downloads and benchmarks are given a store each, so both survive the process
+    that started them. Neither resumes on its own: what comes back is a record,
+    and restarting a transfer or a measurement is a decision someone makes.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.backend: gpu_mod.GpuBackend = gpu_mod.NvmlBackend()
-        self.downloads = downloads_mod.DownloadManager()
-        self.bench = bench_mod.BenchmarkRunner(read_gpus=self.gpus)
+        self.downloads = downloads_mod.DownloadManager(
+            store=JsonStore(settings.state_dir / "downloads.json")
+        )
+        self.bench = bench_mod.BenchmarkRunner(
+            read_gpus=self.gpus, store=JsonStore(settings.state_dir / "benchmarks.json")
+        )
         self.cuda_mapping = gpu_mod.CudaMapping()
         self.mapping_resolved = False
         self._key_for_path: tuple[str, str] | None = None
+        self.downloads.restore()
+        self.bench.restore()
 
     def registry_key_for(self, model_path: str | None) -> str | None:
         """Which registry entry the running server loaded, if any.
@@ -209,6 +231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "llama_server_exists": settings.llama_server is not None,
             "llama_server_source": settings.llama_resolution.as_dict(),
             "config_file": str(config_mod.config_file()),
+            "state_dir": str(settings.state_dir),
             # Surfaced so the UI can tell a fresh install what it still needs,
             # instead of appearing broken.
             "problems": problems,
@@ -468,7 +491,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="no such active download")
         # The partial file is kept deliberately, so resuming costs seconds
         # rather than starting the whole transfer again.
-        return {"cancelled": True, "note": "partial file kept; starting again will resume"}
+        return {"cancelled": True, "note": "partial file kept; resuming will continue from it"}
+
+    @app.post("/api/downloads/{download_id}/resume")
+    async def download_resume(download_id: str) -> dict[str, Any]:
+        """Continue a transfer that stopped -- cancelled, failed, or interrupted.
+
+        This is the path back for a download Headroom was in the middle of when
+        it was shut down. The bytes are still in the `.part` file, so what is
+        needed is the record that says which repo they came from, and that is
+        what survives a restart now.
+        """
+        hr: State = app.state.hr
+        try:
+            download = hr.downloads.resume(download_id)
+        except downloads_mod.DownloadError as exc:
+            status = 404 if str(exc) == "no such download" else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        return download.to_dict() | {"note": "resumed from the bytes already on disk"}
 
     # ---------------------------------------------------------------- bench
     @app.get("/api/bench")
