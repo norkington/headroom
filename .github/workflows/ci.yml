@@ -54,25 +54,12 @@ jobs:
         # skipped" is decoration.
         run: uv run pytest -v --strict-markers
 
-      - name: Import the app without a GPU
-        # NVML is absent on CI runners. The app must still start and report the
-        # backend as unavailable rather than crashing -- that is the same path a
-        # user on an unsupported GPU hits.
-        run: |
-          uv run python -c "
-          from fastapi.testclient import TestClient
-          from headroom.app import create_app, Settings
-          with TestClient(create_app(Settings())) as c:
-              h = c.get('/api/health').json()
-              assert h['ok'] is True, h
-              print('health ok, gpu backend available:', h['gpu_backend_available'])
-              g = c.get('/api/gpus').json()
-              assert g['gpus'] == [], 'expected no GPUs on a CI runner'
-              print('gpus endpoint degrades cleanly with no NVML')
-              s = c.get('/api/server').json()
-              assert s['status'] == 'stopped', s
-              print('server endpoint reports stopped with nothing running')
-          "
+      # NOTE: there is deliberately no inline Python here any more. The
+      # degraded-environment checks -- no GPU, no registry, no llama.cpp -- now
+      # live in tests/test_units.py, where they are linted, formatted and run on
+      # every developer machine. An earlier version embedded them in this file,
+      # where nothing checked them, and they drifted against a changed
+      # constructor signature until CI caught it.
 
   web:
     name: frontend

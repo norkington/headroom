@@ -604,3 +604,70 @@ def test_an_empty_registry_says_so_rather_than_reporting_a_typo(tmp_path: Path) 
 
     with pytest.raises(RegistryError, match="no models in the registry yet"):
         reg.get()
+
+
+# ---------------------------------------------------------------- degraded environments
+
+
+def test_the_app_serves_without_a_gpu_or_a_registry(monkeypatch, tmp_path: Path) -> None:
+    """Headroom must come up on a machine with none of its dependencies.
+
+    This lived as an inline Python snippet inside the CI workflow, where it was
+    unlinted, untested locally, and free to drift -- which it promptly did,
+    calling a constructor signature that had changed. YAML is a poor place to
+    keep code. Here it runs on every machine, including the developer's.
+    """
+    from fastapi.testclient import TestClient
+
+    from headroom.app import Settings, create_app
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HEADROOM_REGISTRY", raising=False)
+    monkeypatch.delenv("HEADROOM_LLAMA_SERVER", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings.resolve()
+
+    with TestClient(create_app(settings)) as client:
+        health = client.get("/api/health").json()
+        assert health["ok"] is True, health
+        assert "problems" in health, "a degraded install must say what it is missing"
+
+        # Whatever the hardware, this must be a list rather than an error.
+        gpus = client.get("/api/gpus").json()
+        assert isinstance(gpus["gpus"], list)
+
+        # No server running, and no llama.cpp to start one with.
+        assert client.get("/api/server").json()["status"] == "stopped"
+
+        # The registry was created, so this is 200 with nothing in it -- not a 404.
+        models = client.get("/api/models")
+        assert models.status_code == 200, models.text
+        assert models.json()["models"] == []
+
+
+def test_starting_without_llama_cpp_explains_itself(monkeypatch, tmp_path: Path) -> None:
+    """503 with a reason beats a traceback or a silent no-op."""
+    from fastapi.testclient import TestClient
+
+    from headroom.app import Settings, create_app
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HEADROOM_LLAMA_SERVER", raising=False)
+    monkeypatch.delenv("HEADROOM_REGISTRY", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings.resolve()
+    if settings.llama_server is not None:
+        pytest.skip("llama-server is installed in a conventional location here")
+
+    with TestClient(create_app(settings)) as client:
+        resp = client.post("/api/server/start")
+        assert resp.status_code == 503
+        assert "llama-server" in resp.json()["detail"]
