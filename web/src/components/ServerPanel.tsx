@@ -174,12 +174,34 @@ export function ServerPanel({
           operating point that trades context and speed for the projector's
           VRAM. Saying so at the moment of choosing costs less than a failed
           load explains later. */}
-      {stopped && vision && chosen?.vision_supported && (
+      {stopped && vision && chosen?.vision_supported && chosen.vision_tuned && (
         <div className="finding info">
           <div className="finding-detail">
             The vision profile is its own operating point, not a flag:{" "}
             <code>{chosen.key}</code> carries a separate context length and tensor split for it,
             and the projector takes VRAM the text-only profile spends on context.
+          </div>
+        </div>
+      )}
+
+      {/* Whether that operating point is actually *known* is the part worth
+          separating. An entry added through the UI gets a projector and nothing
+          else, so vision starts at the text context -- an honest attempt that is
+          often too tight, and far easier to understand before the load than
+          after it. */}
+      {stopped && vision && chosen?.vision_supported && !chosen.vision_tuned && (
+        <div className="finding caution">
+          <div className="finding-title">This vision profile is untuned</div>
+          <div className="finding-detail">
+            <code>{chosen.key}</code> has a projector but no measured operating point, so vision
+            will start at the full text context
+            {chosen.serve["ctx"] != null
+              ? ` (${Number(chosen.serve["ctx"]).toLocaleString()})`
+              : ""}
+            . The projector&rsquo;s VRAM comes out of the context budget, so this may fail to
+            allocate. If it does, shorten the context and record what worked in the
+            registry&rsquo;s <code>vision</code> block — that is the measurement Headroom will
+            not guess at.
           </div>
         </div>
       )}

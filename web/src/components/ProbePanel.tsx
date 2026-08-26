@@ -38,6 +38,13 @@ interface ProbeResult {
 interface RepoFile {
   filename: string;
   size_gib: number;
+  kind: "model" | "projector";
+}
+
+interface RepoListing {
+  files: RepoFile[];
+  projectors: RepoFile[];
+  suggested_projector: string | null;
 }
 
 export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
@@ -49,6 +56,8 @@ export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [added, setAdded] = useState<string | null>(null);
   const [key, setKey] = useState("");
+  const [projectors, setProjectors] = useState<RepoFile[]>([]);
+  const [mmproj, setMmproj] = useState("");
 
   const listFiles = async () => {
     if (!repo.trim()) return;
@@ -57,12 +66,22 @@ export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
     setFiles([]);
     setResult(null);
     setSelected("");
+    setProjectors([]);
+    setMmproj("");
     try {
-      const d = await getJSON<{ files: RepoFile[] }>(
+      const d = await getJSON<RepoListing>(
         `/api/hf/files?repo=${encodeURIComponent(repo.trim())}`,
       );
       setFiles(d.files);
-      if (d.files.length === 0) setError("No .gguf files in that repository.");
+      setProjectors(d.projectors);
+      // Pre-selected, not silently applied: the choice is visible below and can
+      // be changed or cleared before anything is downloaded.
+      setMmproj(d.suggested_projector ?? "");
+      if (d.files.length === 0 && d.projectors.length === 0) {
+        setError("No .gguf files in that repository.");
+      } else if (d.files.length === 0) {
+        setError("That repository has only a projector in it, and no weights to pair it with.");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -108,6 +127,7 @@ export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
         file: selected,
         download: "true",
       });
+      if (mmproj) params.set("mmproj", mmproj);
       const d = await postJSON<{ added: string }>(`/api/registry/add?${params}`);
       setAdded(d.added);
       onAdded?.();
@@ -185,6 +205,37 @@ export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
             </div>
           ))}
 
+          {projectors.length > 0 && (
+            <div className="picker" style={{ marginTop: 14 }}>
+              <label className="picker-field">
+                <span className="k">projector</span>
+                <select value={mmproj} onChange={(e) => setMmproj(e.target.value)}>
+                  <option value="">none — text only</option>
+                  {projectors.map((p) => (
+                    <option key={p.filename} value={p.filename}>
+                      {p.filename} · {p.size_gib.toFixed(2)} GiB
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span className="picker-meta">downloaded with the weights</span>
+            </div>
+          )}
+
+          {mmproj && (
+            <div className="finding caution">
+              <div className="finding-title">Vision will be marked supported, not tuned</div>
+              <div className="finding-detail">
+                The projector proves this model <em>can</em> do vision. It does not say at what
+                context: the projector&rsquo;s VRAM comes out of the context budget, so a working
+                vision profile usually means a shorter context and sometimes a different tensor
+                split. Those are measurements, so Headroom will not invent them — the entry gets{" "}
+                <code>supported</code> and nothing else, and vision will first run at the text
+                context, which may well be too tight.
+              </div>
+            </div>
+          )}
+
           <div className="add-row">
             <input
               type="text"
@@ -207,6 +258,13 @@ export function ProbePanel({ onAdded }: { onAdded?: () => void }) {
                 Downloading now &mdash; see below. The entry is marked{" "}
                 <strong>not measured</strong>: its settings are defaults or inherited, never
                 observed on this file. Benchmark it before trusting the numbers.
+                {mmproj && (
+                  <>
+                    {" "}
+                    The projector <code>{mmproj}</code> is being fetched alongside the weights, so
+                    vision does not fail at load time for want of a file.
+                  </>
+                )}
               </div>
             </div>
           )}

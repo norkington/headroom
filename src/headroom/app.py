@@ -308,6 +308,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "uncensored": m.uncensored,
                     "license": m.license,
                     "vision_supported": bool(m.vision.get("supported")),
+                    "vision_tuned": m.vision_tuned,
+                    "mmproj": m.mmproj,
                     "why_this_build": m.why_this_build,
                     "serve": m.serve,
                     "measured": m.measured,
@@ -389,14 +391,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------------------------------------------------------------- probe
     @app.get("/api/hf/files")
     async def hf_files(repo: str) -> dict[str, Any]:
-        """List the GGUF files in a HuggingFace repository."""
+        """List the GGUF files in a HuggingFace repository, quants and projectors apart.
+
+        Kept apart because they are not interchangeable and both are `.gguf`. A
+        projector offered in a list of quants is a thing someone will eventually
+        pick, and it will fail late -- at load, not at selection.
+        """
         try:
             files = await gguf_mod.list_repo_files(repo)
         except gguf_mod.GgufError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"could not reach the hub: {exc}") from exc
-        return {"repo": repo, "files": files}
+        return {
+            "repo": repo,
+            "files": [f for f in files if f["kind"] == "model"],
+            "projectors": [f for f in files if f["kind"] == "projector"],
+            # A suggestion the caller should show rather than apply silently:
+            # which precision is wanted is a VRAM judgement, not a filename fact.
+            "suggested_projector": gguf_mod.choose_projector(files),
+        }
 
     @app.get("/api/probe")
     async def probe_gguf(repo: str | None = None, file: str | None = None, path: str | None = None):
@@ -567,6 +581,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         label: str | None = None,
         download: bool = True,
         inherit_from: str | None = None,
+        mmproj: str | None = None,
     ) -> dict[str, Any]:
         """Add a probed quant to the registry, and optionally fetch it.
 
@@ -617,6 +632,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             has_mtp=analysis.has_mtp,
             template=(reg.raw.get("models") or {}).get("_template"),
             inherit_from=inherit,
+            mmproj=mmproj,
         )
 
         try:
@@ -632,8 +648,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
         if download:
-            d = hr.downloads.start(repo, file, target_dir / file)
-            result["download"] = d.to_dict()
+            result["download"] = hr.downloads.start(repo, file, target_dir / file).to_dict()
+            if mmproj:
+                # Fetched with the weights, not on first use. An entry that claims
+                # vision and has no projector on disk fails at load -- minutes into
+                # a start, long after the decision that caused it.
+                result["projector_download"] = hr.downloads.start(
+                    repo, mmproj, target_dir / mmproj
+                ).to_dict()
 
         return result
 

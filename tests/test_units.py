@@ -681,3 +681,200 @@ def test_starting_without_llama_cpp_explains_itself(monkeypatch, tmp_path: Path)
         resp = client.post("/api/server/start")
         assert resp.status_code == 503
         assert "llama-server" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------- projectors
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("mmproj-F16.gguf", True),
+        ("mmproj-Unleashed-f16.gguf", True),
+        ("Qwen3-VL-mmproj-f16.gguf", True),
+        ("MMPROJ-MODEL-F16.GGUF", True),
+        ("Qwen3.8-27B-UD-Q4_K_M.gguf", False),
+        # A model that merely mentions projection is not a projector. Matching
+        # loosely here would silently swap the weights for a few hundred MiB.
+        ("some-projection-model-Q4.gguf", False),
+    ],
+)
+def test_projectors_are_recognised_by_name(filename: str, expected: bool) -> None:
+    from headroom.gguf import is_projector
+
+    assert is_projector(filename) is expected
+
+
+def test_the_highest_precision_projector_is_suggested() -> None:
+    from headroom.gguf import choose_projector
+
+    files = [
+        {"filename": "model-Q4_K_M.gguf", "size_bytes": 16_000_000_000, "kind": "model"},
+        {"filename": "mmproj-q8_0.gguf", "size_bytes": 500_000_000, "kind": "projector"},
+        {"filename": "mmproj-f16.gguf", "size_bytes": 900_000_000, "kind": "projector"},
+    ]
+    # f16 over q8_0: the projector is small next to the weights, so quantizing it
+    # saves little and image fidelity is what pays for it.
+    assert choose_projector(files) == "mmproj-f16.gguf"
+
+
+def test_no_projector_in_the_repo_suggests_nothing() -> None:
+    from headroom.gguf import choose_projector
+
+    assert choose_projector([{"filename": "m.gguf", "size_bytes": 1, "kind": "model"}]) is None
+
+
+def test_an_unrecognised_precision_falls_back_to_the_largest() -> None:
+    from headroom.gguf import choose_projector
+
+    files = [
+        {"filename": "mmproj-weird.gguf", "size_bytes": 100, "kind": "projector"},
+        {"filename": "mmproj-odd.gguf", "size_bytes": 900, "kind": "projector"},
+    ]
+    assert choose_projector(files) == "mmproj-odd.gguf"
+
+
+def test_an_added_entry_carries_its_projector(fake_registry: Path) -> None:
+    from headroom.registry import derive_entry
+
+    entry = derive_entry(
+        key="vlm",
+        label="A vision model",
+        repo="owner/vlm-GGUF",
+        filename="vlm-Q4_K_M.gguf",
+        directory="/w/vlm",
+        size_gib=8.0,
+        architecture="new-arch",
+        has_mtp=False,
+        mmproj="mmproj-f16.gguf",
+    )
+
+    assert entry["mmproj"] == "mmproj-f16.gguf"
+    assert entry["vision"]["supported"] is True
+    # A projector existing is not a tuned operating point, and the entry has to
+    # say which of the two it has.
+    assert entry["vision"]["tuned"] is False
+    assert any("NOT tuned" in line for line in entry["why_this_build"])
+
+
+def test_a_model_without_a_projector_is_not_marked_vision_capable(fake_registry: Path) -> None:
+    from headroom.registry import derive_entry
+
+    entry = derive_entry(
+        key="plain",
+        label="Text only",
+        repo="owner/plain-GGUF",
+        filename="plain-Q4_K_M.gguf",
+        directory="/w/plain",
+        size_gib=8.0,
+        architecture="new-arch",
+        has_mtp=False,
+    )
+
+    assert entry["mmproj"] is None
+    assert entry["vision"] == {"supported": False}
+
+
+def test_an_inherited_vision_profile_counts_as_tuned(fake_registry: Path) -> None:
+    from headroom.registry import derive_entry, load
+
+    donor = load(fake_registry).models["demo"]
+    entry = derive_entry(
+        key="sibling",
+        label="Same architecture",
+        repo="owner/sibling-GGUF",
+        filename="sibling-Q4_K_M.gguf",
+        directory="/w/sibling",
+        size_gib=8.0,
+        architecture=donor.arch,
+        has_mtp=False,
+        inherit_from=donor,
+        mmproj="mmproj-f16.gguf",
+    )
+
+    # The donor's profile carries a real ctx and split, measured on that build.
+    assert entry["vision"]["ctx"] == 4096
+    assert entry["vision"]["tuned"] is True
+
+
+def test_adding_a_vision_model_attaches_and_fetches_its_projector(
+    monkeypatch, tmp_path: Path, fake_registry: Path
+) -> None:
+    """The whole point of the feature, through the API.
+
+    Not exercised against a live repository on purpose: the real path downloads
+    tens of gigabytes, and what needs proving here is the wiring, not the hub.
+    """
+    from fastapi.testclient import TestClient
+
+    from headroom.app import Settings, create_app
+
+    async def fake_probe(repo, file, free_vram_mib=None):
+        return _analysis(
+            architecture="demo-arch",
+            name="A vision model",
+            file_size_bytes=8 * 1024**3,
+        )
+
+    monkeypatch.setattr("headroom.gguf.probe_remote", fake_probe)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("HEADROOM_REGISTRY", str(fake_registry))
+    monkeypatch.chdir(tmp_path)
+
+    with TestClient(create_app(Settings.resolve())) as client:
+        resp = client.post(
+            "/api/registry/add",
+            params={
+                "key": "vlm",
+                "repo": "owner/vlm-GGUF",
+                "file": "vlm-Q4_K_M.gguf",
+                "mmproj": "mmproj-f16.gguf",
+                "download": "false",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        entry = resp.json()["entry"]
+
+    assert entry["mmproj"] == "mmproj-f16.gguf"
+    assert entry["vision"]["supported"] is True
+    assert entry["vision"]["tuned"] is False
+
+    # And it round-trips: the registry on disk now describes a vision model.
+    written = load(fake_registry).models["vlm"]
+    assert written.mmproj == "mmproj-f16.gguf"
+    assert written.vision_tuned is False
+
+
+def test_adding_without_a_projector_leaves_the_entry_text_only(
+    monkeypatch, tmp_path: Path, fake_registry: Path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from headroom.app import Settings, create_app
+
+    async def fake_probe(repo, file, free_vram_mib=None):
+        return _analysis(architecture="demo-arch", file_size_bytes=8 * 1024**3)
+
+    monkeypatch.setattr("headroom.gguf.probe_remote", fake_probe)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("HEADROOM_REGISTRY", str(fake_registry))
+    monkeypatch.chdir(tmp_path)
+
+    with TestClient(create_app(Settings.resolve())) as client:
+        resp = client.post(
+            "/api/registry/add",
+            params={
+                "key": "plain",
+                "repo": "owner/plain-GGUF",
+                "file": "plain-Q4_K_M.gguf",
+                "download": "false",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    written = load(fake_registry).models["plain"]
+    assert written.mmproj is None
+    assert written.vision_tuned is False
+    # Claiming vision without a projector is the failure this guards: build_argv
+    # would accept the request and then die on a missing file.
+    assert written.vision.get("supported") is not True

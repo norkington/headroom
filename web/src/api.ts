@@ -69,6 +69,9 @@ export interface ModelSummary {
   uncensored: boolean;
   license: string | null;
   vision_supported: boolean;
+  /** Whether the vision profile is a measured operating point, or only a flag. */
+  vision_tuned: boolean;
+  mmproj: string | null;
   why_this_build: string[];
   serve: Record<string, unknown>;
   measured: Record<string, unknown>;
