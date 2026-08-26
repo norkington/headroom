@@ -618,6 +618,35 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
 .download.complete { border-left-color: var(--ok); }
 .download.failed { border-left-color: var(--critical); }
 .download.cancelled { border-left-color: var(--ink-3); }
+/* Interrupted is not failed. The transfer was fine; the process stopped. It
+   reads as unfinished business rather than as an error. */
+.download.interrupted { border-left-color: var(--tight); }
+
+/*
+ * Finished transfers are worth keeping and not worth looking at. Folded away
+ * so that history cannot push a live transfer down the page.
+ */
+.dl-earlier > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  padding: 6px 2px;
+  user-select: none;
+}
+.dl-earlier > summary:hover { color: var(--ink-2); }
+.dl-earlier[open] > summary { margin-bottom: 8px; }
+
+.bench-history { margin-top: 14px; border-top: 1px solid var(--rule); }
+.bench-history > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  padding: 9px 2px 6px;
+  user-select: none;
+}
+.bench-history > summary:hover { color: var(--ink-2); }
 
 .download-head {
   display: flex;

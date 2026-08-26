@@ -54,6 +54,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from .store import JsonStore, prune
+
 log = logging.getLogger(__name__)
 
 DEFAULT_REPS = 3
@@ -158,6 +160,21 @@ class BenchStatus(str, Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    # Headroom stopped mid-run. Kept as a record of an attempt, never as a
+    # result: a run cut short measures the part of the workload it got to, and
+    # rule 1 exists because that part is not representative.
+    INTERRUPTED = "interrupted"
+
+
+#: Nothing is working on these any more.
+FINISHED = frozenset(
+    {
+        BenchStatus.COMPLETE.value,
+        BenchStatus.FAILED.value,
+        BenchStatus.CANCELLED.value,
+        BenchStatus.INTERRUPTED.value,
+    }
+)
 
 
 class BenchError(RuntimeError):
@@ -219,8 +236,91 @@ class Benchmark:
             "result": self.result,
             "written": self.written,
             "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
             "elapsed_seconds": round((self.finished_at or time.time()) - self.started_at, 1),
         }
+
+    def to_record(self) -> dict[str, Any]:
+        """The durable form: everything except the live progress fields.
+
+        A finished run is worth keeping for the same reason its figures are
+        worth reporting with a spread -- the next person to compare two numbers
+        needs to see how each was reached, and the registry records only the
+        result. `phase` and the elapsed clock describe a run in motion and are
+        not carried.
+        """
+        return {
+            "id": self.id,
+            "model_key": self.model_key,
+            "model_path": self.model_path,
+            "port": self.port,
+            "reps": self.reps,
+            "warmup": self.warmup,
+            "max_tokens": self.max_tokens,
+            "prefill_tokens": self.prefill_tokens,
+            "status": self.status.value,
+            "n_ctx": self.n_ctx,
+            "runs_done": self.runs_done,
+            "runs_total": self.runs_total,
+            "per_task": self.per_task,
+            "result": self.result,
+            "written": self.written,
+            "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> Benchmark | None:
+        """Rebuild from a saved record.
+
+        A run that was still going when the process died comes back
+        `interrupted` and **without a result**, even if some tasks had already
+        produced figures. Those partial numbers are exactly what rules 1 and 3
+        say to throw away: warm-up may not have finished, prefill certainly did
+        not run, and a decode figure from two of three tasks is not the same
+        measurement as one from three. Cancelling records nothing for the same
+        reason, and a crash is not a better outcome than a cancel.
+        """
+        try:
+            status = BenchStatus(record["status"])
+            b = cls(
+                id=str(record["id"]),
+                model_key=str(record["model_key"]),
+                model_path=str(record.get("model_path") or ""),
+                port=int(record.get("port") or 0),
+                reps=int(record.get("reps") or DEFAULT_REPS),
+                warmup=int(record.get("warmup") or 0),
+                max_tokens=int(record.get("max_tokens") or DEFAULT_MAX_TOKENS),
+                prefill_tokens=int(record.get("prefill_tokens") or 0),
+                status=status,
+                n_ctx=record.get("n_ctx"),
+                runs_done=int(record.get("runs_done") or 0),
+                runs_total=int(record.get("runs_total") or 0),
+                per_task=dict(record.get("per_task") or {}),
+                result=record.get("result"),
+                written=bool(record.get("written")),
+                error=record.get("error"),
+                started_at=float(record.get("started_at") or time.time()),
+                finished_at=record.get("finished_at"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("ignoring unreadable benchmark record: %s", exc)
+            return None
+
+        b.phase = status.value
+        if status in (BenchStatus.QUEUED, BenchStatus.RUNNING):
+            b.status = BenchStatus.INTERRUPTED
+            b.phase = "interrupted"
+            b.result = None
+            b.per_task = {}
+            b.finished_at = b.finished_at or time.time()
+            b.error = (
+                "Headroom stopped while this run was in progress. Nothing was recorded -- a "
+                "partial run is not a measurement."
+            )
+        return b
 
 
 def stdev(values: list[float]) -> float:
@@ -258,13 +358,43 @@ class BenchmarkRunner:
     producing two numbers that are both wrong and neither obviously so.
     """
 
-    def __init__(self, read_gpus: GpuReader | None = None) -> None:
+    def __init__(self, read_gpus: GpuReader | None = None, store: JsonStore | None = None) -> None:
         self._jobs: dict[str, Benchmark] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         # Injected rather than imported so this module does not depend on how
         # telemetry is polled, and so a machine with no GPU backend simply
         # records no VRAM figure instead of failing the run.
         self._read_gpus = read_gpus
+        self._store = store
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        self._store.save(prune([b.to_record() for b in self.list()], finished=FINISHED))
+
+    def restore(self) -> int:
+        """Reload runs from a previous process. Returns how many came back.
+
+        Results outlive the process that produced them because they cost
+        minutes of loaded GPU to obtain, and because the registry keeps only the
+        figures -- not the rep count, the acceptance spread or the cached-prefill
+        count that say how much weight the figures carry.
+        """
+        if self._store is None:
+            return 0
+        restored = 0
+        for record in self._store.load():
+            b = Benchmark.from_record(record)
+            if b is None or b.id in self._jobs:
+                continue
+            self._jobs[b.id] = b
+            restored += 1
+        if restored:
+            log.info("restored %d benchmark record(s)", restored)
+            # The reconciled view goes straight back, so a record left saying
+            # `running` does not outlive the process by another restart.
+            self._persist()
+        return restored
 
     def list(self) -> list[Benchmark]:
         return sorted(self._jobs.values(), key=lambda b: b.started_at, reverse=True)
@@ -310,6 +440,7 @@ class BenchmarkRunner:
         bench.runs_total = bench.warmup + len(TASKS) * bench.reps + bench.reps
         self._jobs[bench.id] = bench
         self._tasks[bench.id] = asyncio.create_task(self._run(bench, on_complete))
+        self._persist()
         return bench
 
     def cancel(self, bench_id: str) -> bool:
@@ -401,16 +532,23 @@ class BenchmarkRunner:
                     b.error = f"measured successfully, but recording it failed: {exc}"
                     log.exception("recording benchmark %s failed", b.id)
 
+            # Saved after the registry write, not before: `written` is half of
+            # what the record says, and a run kept as unwritten when it was
+            # written sends someone looking for a figure that is already there.
+            self._persist()
+
         except asyncio.CancelledError:
             b.status = BenchStatus.CANCELLED
             b.phase = "cancelled"
             b.finished_at = time.time()
+            self._persist()
             raise
         except Exception as exc:
             b.status = BenchStatus.FAILED
             b.phase = "failed"
             b.error = str(exc)
             b.finished_at = time.time()
+            self._persist()
             log.exception("benchmark %s failed", b.id)
 
     async def _read_n_ctx(self, client: httpx.AsyncClient, port: int) -> int | None:

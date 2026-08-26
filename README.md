@@ -97,6 +97,20 @@ means a shorter context and often a different tensor split, and those are
 measurements rather than deductions. The UI says which of the two you have at
 the moment you tick the box, not when the load fails.
 
+**Work in progress outlives the process.** Closing Headroom must not cost you a
+download or a run record, for the same reason closing it must not unload your
+model. Downloads and benchmarks are written to a state directory as they change
+(`/api/health` prints where), so a transfer that was in flight comes back as
+**interrupted** with a Resume button rather than leaving a nameless 9 GiB
+`.part` file on disk, and a finished benchmark keeps the rep count, spread and
+acceptance range that `models.json` has no room for.
+
+Neither restarts on its own. What comes back is a record; picking it up again is
+a decision you make. And an interrupted benchmark comes back **without figures**
+— a run cut short measured the part of the workload it reached, which is exactly
+what the warm-up and prefill rules say to discard. A crash is not a better
+outcome than a cancel, and cancelling records nothing.
+
 ## Requirements
 
 - Python 3.11+

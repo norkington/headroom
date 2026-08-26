@@ -47,6 +47,7 @@ export function BenchPanel({
   onRecorded: () => void;
 }) {
   const [current, setCurrent] = useState<BenchInfo | null>(null);
+  const [earlier, setEarlier] = useState<BenchInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recorded = useRef<string | null>(null);
@@ -56,6 +57,10 @@ export function BenchPanel({
       const d = await getJSON<{ benchmarks: BenchInfo[] }>("/api/bench");
       const latest = d.benchmarks[0] ?? null;
       setCurrent(latest);
+      // Runs survive a restart now, so there is a history to compare against.
+      // Only completed ones: a cancelled or interrupted run has no figures, and
+      // a row of dashes in a comparison table is noise.
+      setEarlier(d.benchmarks.slice(1).filter((b) => b.status === "complete" && b.result));
       // Refresh the model list once when a run lands, not on every poll.
       if (latest && latest.status === "complete" && recorded.current !== latest.id) {
         recorded.current = latest.id;
@@ -183,6 +188,21 @@ export function BenchPanel({
         </div>
       )}
 
+      {/* A run that was in flight when the backend stopped. Kept as a record of
+          an attempt so the gap is visible, but carrying no figures: the tasks
+          it reached are the ones the warm-up and prefill rules say not to
+          average, and a crash is not a better outcome than a cancel. */}
+      {current?.status === "interrupted" && (
+        <div className="finding info">
+          <div className="finding-detail">
+            The last run was still going when Headroom stopped, so nothing was recorded. Whatever
+            it had measured by then covered part of the workload — warm-up may not have finished
+            and prefill had not run — which is not the same measurement as a complete pass. Run
+            it again.
+          </div>
+        </div>
+      )}
+
       {current?.status === "complete" && result && (
         <div className="bench-result">
           <div className="measured-row">
@@ -290,6 +310,49 @@ export function BenchPanel({
         <div className="error-line">{current.error}</div>
       )}
       {error && <div className="error-line">{error}</div>}
+
+      {/* Earlier runs. The registry keeps one set of figures per model, which
+          is the right thing for a config file and the wrong thing for judging
+          whether a change did anything: two runs six percent apart are not a
+          result, and you can only know that by seeing both. */}
+      {earlier.length > 0 && (
+        <details className="bench-history">
+          <summary>
+            {earlier.length} earlier run{earlier.length === 1 ? "" : "s"}
+          </summary>
+          <table className="bench-tasks">
+            <thead>
+              <tr>
+                <th>when</th>
+                <th>model</th>
+                <th>decode</th>
+                <th>prefill</th>
+                <th>ctx</th>
+              </tr>
+            </thead>
+            <tbody>
+              {earlier.map((b) => (
+                <tr key={b.id}>
+                  <td>{new Date((b.finished_at ?? b.started_at) * 1000).toLocaleString()}</td>
+                  <td>{b.model_key}</td>
+                  <td>
+                    {num(b.result?.decode_tok_s, 2)}
+                    {b.result?.decode_sd != null && (
+                      <span className="picker-meta"> ± {b.result.decode_sd.toFixed(2)}</span>
+                    )}
+                  </td>
+                  <td>{num(b.result?.prefill_tok_s, 1)}</td>
+                  <td>{b.result?.context_label ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="picker-meta" style={{ display: "block", marginTop: 8 }}>
+            Decode is shown with its spread because a difference under about 6% is not a result.
+            Only the most recent run's figures are in models.json.
+          </div>
+        </details>
+      )}
     </div>
   );
 }
