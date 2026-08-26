@@ -651,3 +651,110 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
   color: var(--ink-3);
 }
 .download-stats button { padding: 4px 11px; font-size: 0.78rem; }
+
+/* ---------------------------------------------------------------- picker */
+/*
+ * The picker only exists while the server is stopped, so it reads as "what
+ * will start" rather than as a description of what is loaded. It shares the
+ * panel with the status facts above it, and the top rule keeps the two from
+ * being read as one block.
+ */
+.picker {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.picker-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 260px;
+}
+.picker-field select {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  padding: 7px 11px;
+  border-radius: 3px;
+  border: 1px solid var(--rule-2);
+  background: var(--surface-2);
+  color: var(--ink);
+  cursor: pointer;
+}
+.picker-field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.picker-field select:disabled { opacity: 0.42; cursor: not-allowed; }
+
+.picker-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.86rem;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+}
+.picker-check input { accent-color: var(--accent); cursor: pointer; }
+/* Not hidden when unavailable: a control that vanishes leaves the user
+   wondering whether the model supports vision or the app forgot the checkbox. */
+.picker-check.disabled { opacity: 0.42; cursor: not-allowed; }
+.picker-check.disabled input { cursor: not-allowed; }
+
+.picker-meta {
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  color: var(--ink-3);
+}
+
+/* ---------------------------------------------------------------- bench */
+.bench-progress {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.bench-phase {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 13px;
+  margin-bottom: 8px;
+  font-size: 0.86rem;
+  color: var(--ink-2);
+}
+
+.bench-result {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+
+.bench-tasks {
+  width: 100%;
+  margin-top: 13px;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+.bench-tasks th {
+  text-align: left;
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 0 13px 6px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.bench-tasks td {
+  padding: 6px 13px 6px 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink-2);
+}
+.bench-tasks tbody tr:last-child td { border-bottom: none; }
+.bench-tasks td:first-child { color: var(--ink); }

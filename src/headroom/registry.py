@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -277,6 +278,20 @@ def build_argv(
 # --------------------------------------------------------------------------
 
 
+def _write(path: Path, text: str) -> None:
+    """Write text without letting the platform rewrite the line endings.
+
+    `Path.write_text` opens in text mode, which on Windows silently translates
+    every newline to CRLF. That turned a two-line edit of this registry into a
+    whole-file diff, and left the backup differing byte-for-byte from the
+    original it is supposed to be a copy of. The file is shared with the user's
+    launch scripts and may well be under version control, so a write that
+    changes one entry has to change one entry.
+    """
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 def derive_entry(
     *,
     key: str,
@@ -399,9 +414,122 @@ def add_entry(
         raw["default"] = key
 
     backup = path.with_suffix(path.suffix + ".bak")
-    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    _write(backup, path.read_text(encoding="utf-8"))
 
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _write(tmp, json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
     tmp.replace(path)
     log.info("added %r to %s (backup at %s)", key, path, backup.name)
+
+
+def find_by_path(reg: Registry, model_path: str | Path) -> ModelEntry | None:
+    """Find the entry whose weights file is `model_path`, or None.
+
+    This is how a benchmark learns *which entry it is measuring*: from the file
+    the running server actually loaded, never from what the UI last asked for.
+    Headroom attaches to servers it did not start, so the two can differ, and
+    writing a measurement to the entry the user happened to have selected would
+    attribute one model's numbers to another — silently, and in a file shared
+    with their shell scripts.
+
+    Compared case-insensitively with separators normalised, because the same file
+    legitimately arrives with forward slashes from the registry and with Windows
+    backslashes from the process command line.
+    """
+
+    def norm(p: str | Path) -> str:
+        return str(p).replace("\\", "/").casefold().rstrip("/")
+
+    target = norm(model_path)
+    for entry in reg.models.values():
+        if norm(entry.path) == target:
+            return entry
+    return None
+
+
+def record_measurement(
+    path: str | Path,
+    key: str,
+    measured: dict[str, Any],
+    *,
+    verified: dict[str, Any] | None = None,
+    owns: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Write measured figures onto an existing entry. Returns the previous block.
+
+    The counterpart to `add_entry`, and deliberately a separate function rather
+    than a flag on it. Adding refuses to touch an existing key because doing so
+    would discard measurements someone earned; this one exists precisely *to*
+    replace them, so the two need different names and different call sites.
+
+    `owns` decides how much of the old block goes. It answers "is the writer the
+    authority on this key?" -- keys it owns are replaced or dropped, keys it does
+    not are carried forward untouched and listed under ``carried_forward``.
+    Without it the whole block is replaced.
+
+    That seam exists because both simple answers are wrong. Replacing everything
+    loses hand-written analysis that no benchmark can regenerate; keeping
+    everything lets a figure from an older run sit beside fresh ones looking
+    equally current, which is the exact dishonesty this project exists to avoid.
+    The registry cannot tell those apart -- it does not know what a benchmark
+    measures -- so the writer says, and what survived is recorded in the file
+    rather than left for the reader to infer.
+
+    What it will not do is as important as what it does:
+
+    - **Only `measured` and `verified` are touched.** The `serve` block is the
+      user's tuning and is never rewritten by a measurement — a benchmark
+      observes a configuration, it does not get to change one. Label, repo,
+      paths and comments are likewise left exactly as found.
+    - **The previous block is returned to the caller**, so a UI can show what
+      the numbers replaced instead of silently overwriting a figure the user
+      may have hand-checked.
+    - Backup first, then an atomic rename, as everywhere else that writes this
+      file. It is shared with the user's launch scripts.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise RegistryError(f"registry not found: {path}")
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    models = raw.get("models") or {}
+    if key not in models:
+        known = ", ".join(k for k in models if not k.startswith(PRIVATE_PREFIX))
+        raise RegistryError(
+            f"unknown model {key!r}, so there is nothing to record on. Known: {known}"
+        )
+
+    entry = models[key]
+    previous = dict(entry.get("measured") or {})
+
+    block = dict(measured)
+    if owns is not None:
+        carried = [k for k in previous if not owns(k) and k not in block]
+        for k in carried:
+            block[k] = previous[k]
+        if carried:
+            # Named in the file, not merely preserved. A reader months later has
+            # to be able to tell which of these figures this run stands behind.
+            block["carried_forward"] = carried
+    entry["measured"] = block
+
+    # `benched` becomes true because a benchmark is exactly what just happened.
+    # `loads` becomes true because the numbers could not exist otherwise -- the
+    # model was serving when they were taken. Nothing else is asserted: a
+    # benchmark says nothing about long-context retrieval, so `needle_tested`
+    # keeps whatever value it had.
+    current_verified = dict(entry.get("verified") or {})
+    current_verified.update({"loads": True, "benched": True})
+    if verified:
+        current_verified.update(verified)
+    entry["verified"] = current_verified
+
+    backup = path.with_suffix(path.suffix + ".bak")
+    _write(backup, path.read_text(encoding="utf-8"))
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    _write(tmp, json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+    log.info("recorded measurement for %r in %s (backup at %s)", key, path, backup.name)
+
+    return previous

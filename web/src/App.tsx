@@ -6,6 +6,7 @@ import { GpuCard } from "./components/GpuCard";
 import { ServerPanel } from "./components/ServerPanel";
 import { ModelList } from "./components/ModelList";
 import { ProbePanel } from "./components/ProbePanel";
+import { BenchPanel } from "./components/BenchPanel";
 import { Downloads } from "./components/Downloads";
 
 interface GpuResponse {
@@ -15,14 +16,18 @@ interface GpuResponse {
 export function App() {
   const feed = useTelemetry();
   const [models, setModels] = useState<ModelSummary[]>([]);
+  const [registryDefault, setRegistryDefault] = useState<string | null>(null);
   const [mapping, setMapping] = useState<CudaMapping | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     void getJSON<Health>("/api/health").then(setHealth).catch(() => undefined);
-    void getJSON<{ models: ModelSummary[] }>("/api/models")
-      .then((d) => setModels(d.models))
+    void getJSON<{ models: ModelSummary[]; default: string }>("/api/models")
+      .then((d) => {
+        setModels(d.models);
+        setRegistryDefault(d.default || null);
+      })
       .catch((e: Error) => setLoadError(e.message));
     void getJSON<GpuResponse>("/api/gpus")
       .then((d) => setMapping(d.cuda_mapping))
@@ -101,7 +106,25 @@ export function App() {
       <section>
         <h2>Inference server</h2>
         {server ? (
-          <ServerPanel server={server} onChanged={refresh} />
+          <ServerPanel
+            server={server}
+            models={models}
+            registryDefault={registryDefault}
+            onChanged={refresh}
+          />
+        ) : (
+          <div className="empty">Waiting for server state…</div>
+        )}
+      </section>
+
+      {/* Sits directly under the server it measures. A benchmark is only
+          meaningful against a specific running process, and putting it beside
+          the model list instead would suggest you can benchmark an entry rather
+          than a thing that is loaded. */}
+      <section>
+        <h2>Benchmark</h2>
+        {server ? (
+          <BenchPanel server={server} onRecorded={refresh} />
         ) : (
           <div className="empty">Waiting for server state…</div>
         )}

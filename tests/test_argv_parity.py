@@ -58,6 +58,61 @@ def _parse(argv: list[str]) -> tuple[str, dict[str, str], set[str]]:
     return exe, valued, booleans
 
 
+def _command_line_from(stdout: str) -> list[str] | None:
+    """Pull the launcher's command line out of its output.
+
+    Not "the first line mentioning llama-server". When the GPUs are busy the
+    launcher warns and lists the offending processes, and once a model is
+    actually serving, one of those rows names llama-server itself -- so the
+    naive match picked a line of `nvidia-smi` output and concluded the launcher
+    had passed no flags at all. This test then failed for the sole reason that
+    the thing it exists to compare against was running.
+
+    A command line is identified by what it *is* -- a line that parses into
+    flags -- rather than by text it happens to contain, so a future warning
+    cannot shadow it either.
+    """
+    for line in stdout.splitlines():
+        if "llama-server" not in line.lower():
+            continue
+        tokens = line.strip().split()
+        if len(tokens) < 2:
+            continue
+        _, valued, _ = _parse(tokens)
+        if valued:
+            return tokens
+    return None
+
+
+def test_the_launcher_command_line_is_not_confused_with_a_warning() -> None:
+    """Runs everywhere, unlike the parity test it protects.
+
+    That test skips without a local launcher, so the regression it hit would be
+    invisible in CI. This pins the selector against output of the shape the
+    launcher really produces once a model is serving.
+    """
+    stdout = (
+        "[warn] something is already using the GPUs:\n"
+        "       17328, C:/llama.cpp/build/bin/Release/llama-server.exe, 8000 MiB\n"
+        "       This model wants BOTH cards. Stop ComfyUI / training first.\n"
+        "\n"
+        "  model    Qwen3.8-27B Unleashed\n"
+        "  ctx      65536  (KV q8_0/q8_0)   ub 512   MTP on   vision off\n"
+        "\n"
+        "C:/llama.cpp/bin/llama-server.exe -m C:/w/x.gguf --ctx-size 65536 -ngl 99\n"
+    )
+    tokens = _command_line_from(stdout)
+    assert tokens is not None
+    _, valued, _ = _parse(tokens)
+    assert valued["-m"] == "C:/w/x.gguf"
+    assert valued["--ctx-size"] == "65536"
+    assert valued["-ngl"] == "99"
+
+
+def test_output_with_no_command_line_yields_nothing_rather_than_junk() -> None:
+    assert _command_line_from("[warn] 1, llama-server.exe, 8000 MiB\n") is None
+
+
 needs_local = pytest.mark.skipif(
     not (REGISTRY.exists() and LAUNCHER.exists() and shutil.which("powershell")),
     reason="local registry / shell launcher not present",
@@ -85,15 +140,10 @@ def test_argv_matches_shell_launcher() -> None:
         timeout=120,
         check=False,
     )
-    line = next(
-        (ln for ln in (proc.stdout or "").splitlines() if "llama-server" in ln.lower()),
-        None,
-    )
-    assert line, (
+    theirs = _command_line_from(proc.stdout or "")
+    assert theirs, (
         f"launcher produced no command line.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
-
-    theirs = line.strip().split()
 
     _, mine_valued, mine_bool = _parse(mine)
     _, their_valued, their_bool = _parse(theirs)

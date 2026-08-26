@@ -29,6 +29,13 @@ export interface ServerInfo {
   status: ServerStatus;
   pid: number | null;
   model_name: string | null;
+  /**
+   * The registry key of whatever is actually loaded, resolved from the file on
+   * the server's command line — not from what the picker has selected. Null
+   * when the running model is not in the registry, which is a real state:
+   * Headroom attaches to servers it did not start.
+   */
+  model_key: string | null;
   n_ctx: number | null;
   vision: boolean;
   host_ram_mib: number | null;
@@ -68,6 +75,46 @@ export interface ModelSummary {
   verified: Record<string, unknown>;
   /** Whether the numbers were measured on this artifact or inherited. */
   measured_on_this_file: boolean;
+}
+
+export type BenchStatus = "queued" | "running" | "complete" | "failed" | "cancelled";
+
+export interface BenchTaskResult {
+  decode_tok_s: number | null;
+  acceptance: number | null;
+  runs: number;
+}
+
+export interface BenchResult {
+  measured: Record<string, unknown>;
+  n_ctx: number | null;
+  context_label: string;
+  decode_tok_s: number | null;
+  decode_sd: number | null;
+  prefill_tok_s: number | null;
+  acceptance_range: string | null;
+  vram_free_mib: number | null;
+  vram_free_breakdown: string | null;
+  prefill_cached_runs: number;
+  significance_note: string;
+}
+
+export interface BenchInfo {
+  id: string;
+  model_key: string;
+  model_path: string;
+  status: BenchStatus;
+  phase: string;
+  n_ctx: number | null;
+  runs_done: number;
+  runs_total: number;
+  percent: number | null;
+  per_task: Record<string, BenchTaskResult>;
+  result: BenchResult | null;
+  /** Whether the figures were written back into models.json. */
+  written: boolean;
+  error: string | null;
+  elapsed_seconds: number;
 }
 
 export interface Health {

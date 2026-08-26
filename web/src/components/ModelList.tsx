@@ -20,7 +20,14 @@ export function ModelList({ models }: { models: ModelSummary[] }) {
       {models.map((m) => {
         const decode = m.measured["decode_tok_s"];
         const prefill = m.measured["prefill_tok_s"];
-        const vram = m.measured["vram_free_mib_at_64k"];
+        // Found by prefix, not by a fixed name: the key carries the context it
+        // was measured at (`vram_free_mib_at_64k`), so a model tuned to a
+        // different context would otherwise silently show nothing.
+        const vramKey = Object.keys(m.measured).find((k) => k.startsWith("vram_free_mib"));
+        const vram = vramKey ? m.measured[vramKey] : null;
+        const vramAt = vramKey?.startsWith("vram_free_mib_at_")
+          ? vramKey.slice("vram_free_mib_at_".length)
+          : null;
         const needle = m.verified["needle_score"];
         const hasNumbers = decode != null || prefill != null;
 
@@ -62,7 +69,7 @@ export function ModelList({ models }: { models: ModelSummary[] }) {
                   {prefill != null ? `${String(prefill)} tok/s` : "—"}
                 </div>
                 <div>
-                  <span className="k">free vram</span>
+                  <span className="k">free vram{vramAt ? ` @ ${vramAt}` : ""}</span>
                   {vram != null ? `${String(vram)} MiB` : "—"}
                 </div>
                 <div>

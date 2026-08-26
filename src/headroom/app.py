@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import bench as bench_mod
 from . import config as config_mod
 from . import downloads as downloads_mod
 from . import gguf as gguf_mod
@@ -93,8 +94,36 @@ class State:
         self.settings = settings
         self.backend: gpu_mod.GpuBackend = gpu_mod.NvmlBackend()
         self.downloads = downloads_mod.DownloadManager()
+        self.bench = bench_mod.BenchmarkRunner(read_gpus=self.gpus)
         self.cuda_mapping = gpu_mod.CudaMapping()
         self.mapping_resolved = False
+        self._key_for_path: tuple[str, str] | None = None
+
+    def registry_key_for(self, model_path: str | None) -> str | None:
+        """Which registry entry the running server loaded, if any.
+
+        Resolved from the file the server actually has open, because Headroom
+        attaches to servers it did not start -- one launched from a shell script
+        an hour ago is a first-class citizen, and it has no idea what the UI
+        currently has selected in a dropdown.
+
+        Only successful resolutions are cached. A miss is re-checked on the next
+        poll, so adding the running model to the registry starts being reflected
+        immediately rather than after a restart.
+        """
+        if not model_path:
+            return None
+        if self._key_for_path and self._key_for_path[0] == model_path:
+            return self._key_for_path[1]
+        try:
+            reg = registry_mod.load(self.settings.registry_path)
+            entry = registry_mod.find_by_path(reg, model_path)
+        except registry_mod.RegistryError:
+            return None
+        if entry is None:
+            return None
+        self._key_for_path = (model_path, entry.key)
+        return entry.key
 
     def gpus(self) -> list[gpu_mod.Gpu]:
         """Poll, applying the cached CUDA mapping.
@@ -238,6 +267,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "status": state.status,
                         "pid": state.pid,
                         "model_name": state.model_name,
+                        "model_key": hr.registry_key_for(state.model_path),
                         "n_ctx": state.n_ctx,
                         "vision": state.vision,
                         "host_ram_mib": state.host_ram_mib,
@@ -294,8 +324,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------------------------------------------------------------- server
     @app.get("/api/server")
     async def server_state() -> dict[str, Any]:
+        hr: State = app.state.hr
         state = await server_mod.probe(settings.port)
-        return asdict(state) | {"status": state.status}
+        return asdict(state) | {
+            "status": state.status,
+            "model_key": hr.registry_key_for(state.model_path),
+        }
 
     @app.post("/api/server/stop")
     async def server_stop(force: bool = False) -> dict[str, Any]:
@@ -421,6 +455,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # The partial file is kept deliberately, so resuming costs seconds
         # rather than starting the whole transfer again.
         return {"cancelled": True, "note": "partial file kept; starting again will resume"}
+
+    # ---------------------------------------------------------------- bench
+    @app.get("/api/bench")
+    async def bench_list() -> dict[str, Any]:
+        hr: State = app.state.hr
+        return {"benchmarks": [b.to_dict() for b in hr.bench.list()]}
+
+    @app.post("/api/bench/start")
+    async def bench_start(
+        reps: int = bench_mod.DEFAULT_REPS,
+        warmup: int = bench_mod.DEFAULT_WARMUP,
+        prefill_tokens: int = bench_mod.DEFAULT_PREFILL_TOKENS,
+        write: bool = True,
+    ) -> dict[str, Any]:
+        """Benchmark whatever is currently serving, and record the result.
+
+        There is deliberately no `model` parameter. The entry being measured is
+        resolved from the file the running server actually loaded, so the numbers
+        can only ever be attributed to the model that produced them. Letting the
+        caller name a model would make it possible to benchmark one and write the
+        result onto another -- silently, into a file shared with the user's shell
+        scripts, in a project whose whole claim is that its numbers are honest.
+        """
+        hr: State = app.state.hr
+        state = await server_mod.probe(settings.port)
+
+        if state.status != "running":
+            detail = {
+                "loading": (
+                    "the server is still loading. Benchmarking now would measure a model that "
+                    "is not ready -- wait for it to finish."
+                ),
+                "stopped": (
+                    "nothing is serving on port "
+                    f"{settings.port}. Start a model before benchmarking it."
+                ),
+                "orphaned": (
+                    f"something is listening on port {settings.port} but it is not a "
+                    "recognisable llama-server, so there is no telling what would be measured."
+                ),
+            }.get(state.status, f"server status is {state.status!r}")
+            raise HTTPException(status_code=409, detail=detail)
+
+        try:
+            reg = registry_mod.load(settings.registry_path)
+        except registry_mod.RegistryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        entry = registry_mod.find_by_path(reg, state.model_path or "")
+        if entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"the running server loaded {state.model_path!r}, which is not in "
+                    f"{settings.registry_path}. Headroom will not guess which entry these "
+                    "numbers belong to -- add the file to the registry first."
+                ),
+            )
+
+        def record(b: bench_mod.Benchmark) -> bool:
+            if not write or not b.result:
+                return False
+            registry_mod.record_measurement(
+                settings.registry_path,
+                b.model_key,
+                b.result["measured"],
+                # A benchmark is the authority on throughput and on free VRAM.
+                # It is not the authority on the operator's own notes, and a run
+                # that cannot produce a key has no business deleting it.
+                owns=bench_mod.owns_measured_key,
+            )
+            return True
+
+        try:
+            job = hr.bench.start(
+                model_key=entry.key,
+                model_path=str(entry.path),
+                port=settings.port,
+                reps=reps,
+                warmup=warmup,
+                prefill_tokens=prefill_tokens,
+                on_complete=record if write else None,
+            )
+        except bench_mod.BenchError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        return job.to_dict() | {
+            "note": (
+                "running; poll /api/bench. Warm-up runs are discarded and prefill is measured "
+                "separately with a long prompt -- see the benchmark module for why."
+            ),
+            "will_write": write,
+        }
+
+    @app.delete("/api/bench/{bench_id}")
+    async def bench_cancel(bench_id: str) -> dict[str, Any]:
+        hr: State = app.state.hr
+        if not hr.bench.cancel(bench_id):
+            raise HTTPException(status_code=404, detail="no such running benchmark")
+        # Nothing is written on cancel: a partial run is not a measurement, and
+        # recording one would be worse than having no number at all.
+        return {"cancelled": True, "note": "no partial result was recorded"}
 
     # ---------------------------------------------------------------- registry write
     @app.post("/api/registry/add")

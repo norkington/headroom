@@ -629,6 +629,16 @@ def test_the_app_serves_without_a_gpu_or_a_registry(monkeypatch, tmp_path: Path)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
+    # Pinned, because "degraded install" is the subject here and "nothing is
+    # serving" is only the backdrop. Left to the real probe this asserted a fact
+    # about the developer's machine instead: on a box with a model up -- which
+    # is the normal state while working on the benchmark -- it failed for a
+    # reason unrelated to anything it tests.
+    async def nothing_serving(_port, timeout: float = 3.0):
+        return ServerState()
+
+    monkeypatch.setattr("headroom.server.probe", nothing_serving)
+
     settings = Settings.resolve()
 
     with TestClient(create_app(settings)) as client:

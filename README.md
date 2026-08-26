@@ -46,6 +46,15 @@ the model say" but:
   degrades. Headroom reads a remote GGUF's tensor table over a ranged request —
   tens of megabytes, not the whole file — so you can see that before committing.
 
+- **Is that throughput figure real, or inherited?** *(implemented — pick a
+  model, start it, benchmark it)* An entry added through the UI arrives marked
+  NOT MEASURED: its tuning is a template default or a guess copied from a
+  sibling build. Headroom can measure the running model and write the result
+  back, using the same method as the shell benchmark it replaces — warm-up runs
+  discarded, prefill measured separately with a long prompt, cached prefill runs
+  thrown away rather than averaged in, and decode always reported with its
+  spread and its speculative-decoding accept rate.
+
 - **What has to stop before I can start this?** Inference, diffusion, LoRA
   training and games all want the same cards. Headroom knows what is holding
   them and can hand them over.
@@ -69,7 +78,14 @@ what is running.
 
 **Measurements are reported honestly.** Throughput figures come with a standard
 deviation and the sample size. Where a number is inherited rather than measured
-on the exact artifact in front of you, it says so.
+on the exact artifact in front of you, it says so — and the benchmark that
+replaces such a number is attributed to the file the running server actually
+loaded, never to whatever the UI happens to have selected. Recording a
+measurement rewrites only the `measured` and `verified` blocks: a benchmark
+observes a configuration, it does not get to change one. Within that block it
+replaces the figures it is the authority on and carries your own notes forward
+untouched, listing what it carried — so a hand-written comparison survives a
+run, and a stale figure from an older one does not.
 
 ## Requirements
 
