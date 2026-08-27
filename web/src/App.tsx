@@ -77,7 +77,7 @@ export function App() {
       )}
       {mapping?.warning && (
         <div className="notice">
-          <strong>CUDA mapping incomplete.</strong> {mapping.warning}
+          <strong>CUDA mapping is not fully resolved.</strong> {mapping.warning}
         </div>
       )}
 

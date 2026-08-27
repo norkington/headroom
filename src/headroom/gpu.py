@@ -272,9 +272,16 @@ def _try(fn):
 # --------------------------------------------------------------------------
 
 _DEVICE_LINE = re.compile(
-    r"^\s*(?P<dev>CUDA(?P<idx>\d+)):\s*(?P<name>.+?)\s*\(\s*(?P<total>\d+)\s*MiB",
+    r"^\s*(?P<dev>CUDA(?P<idx>\d+)):\s*(?P<name>.+?)\s*\(\s*(?P<total>\d+)\s*MiB"
+    r"(?:\s*,\s*(?P<free>\d+)\s*MiB\s*free)?",
     re.MULTILINE,
 )
+
+# Two candidate cards are only told apart by free VRAM if their free figures
+# differ by more than this. The reading from `--list-devices` and the reading
+# from NVML are taken moments apart, and desktop compositing alone moves free
+# memory by tens of MiB, so a near-tie is a tie.
+AMBIGUOUS_FREE_MIB = 256
 
 
 @dataclass(slots=True)
@@ -285,10 +292,24 @@ class CudaMapping:
     raw_output: str = ""
     source: str = "unresolved"
     warning: str | None = None
+    #: CUDA indices whose physical card could not be established -- identical
+    #: models with indistinguishable free VRAM. The mapping still contains an
+    #: entry for them, because a partial mapping is worse than a guessed one,
+    #: but that entry is a guess and callers must be able to know it.
+    ambiguous: tuple[str, ...] = ()
 
     @property
     def resolved(self) -> bool:
         return bool(self.cuda_to_nvml)
+
+    @property
+    def trustworthy(self) -> bool:
+        """Resolved *and* every device pinned to a specific card.
+
+        `resolved` alone answers "did anything come back", which on a rig of
+        identical cards was true while the mapping was invented.
+        """
+        return self.resolved and not self.ambiguous
 
 
 def resolve_cuda_mapping(llama_server_exe: str | Path, gpus: list[Gpu]) -> CudaMapping:
@@ -326,46 +347,83 @@ def resolve_cuda_mapping(llama_server_exe: str | Path, gpus: list[Gpu]) -> CudaM
             warning="--list-devices produced no parseable device lines",
         )
 
-    # Match on (name, total memory). Name alone is ambiguous on identical-card
-    # rigs; adding total VRAM disambiguates most of them. Where two cards are
-    # genuinely indistinguishable the mapping is arbitrary but also harmless,
-    # since the cards are interchangeable.
+    # Match on (name, total memory), then on free memory where that is not
+    # enough. Name and total are identical across a rig of identical cards, and
+    # the first version took the first still-unclaimed card in NVML order --
+    # producing an identity mapping that looked resolved and was invented.
+    #
+    # That is the worst available outcome on exactly the machines this function
+    # exists for. Four RTX 3090s where llama.cpp enumerates them in a different
+    # order than NVML would report `order_differs: False`, no warning, and every
+    # per-card figure attributed to the wrong physical card.
+    #
+    # `--list-devices` prints free VRAM per device, and identical cards almost
+    # never have identical free VRAM -- one drives a display, one holds a model.
+    # So free memory is the tiebreak, and where even that cannot separate them
+    # the mapping says so instead of guessing quietly.
     remaining = list(enumerate(gpus))
     mapping: dict[int, int] = {}
     unmatched: list[str] = []
+    ambiguous: list[str] = []
 
     for m in matches:
         cuda_idx = int(m.group("idx"))
         name = m.group("name").strip()
         total = int(m.group("total"))
+        free = int(m.group("free")) if m.group("free") else None
 
-        hit = None
-        for pos, (_, gpu) in enumerate(remaining):
-            if gpu.name.strip() == name and abs(gpu.memory_total_mib - total) <= 64:
-                hit = pos
-                break
-        if hit is None:
-            for pos, (_, gpu) in enumerate(remaining):
-                if name in gpu.name or gpu.name in name:
-                    hit = pos
-                    break
-        if hit is None:
+        candidates = [
+            pos
+            for pos, (_, gpu) in enumerate(remaining)
+            if gpu.name.strip() == name and abs(gpu.memory_total_mib - total) <= 64
+        ]
+        if not candidates:
+            candidates = [
+                pos
+                for pos, (_, gpu) in enumerate(remaining)
+                if name in gpu.name or gpu.name in name
+            ]
+        if not candidates:
             unmatched.append(f"CUDA{cuda_idx}={name}")
             continue
+
+        if len(candidates) == 1:
+            hit = candidates[0]
+        elif free is None:
+            # Nothing left to separate them by. Take one, and say it is a guess.
+            hit = candidates[0]
+            ambiguous.append(f"CUDA{cuda_idx}")
+        else:
+            by_free = sorted(
+                candidates, key=lambda pos: abs(remaining[pos][1].memory_free_mib - free)
+            )
+            hit = by_free[0]
+            best = abs(remaining[by_free[0]][1].memory_free_mib - free)
+            runner_up = abs(remaining[by_free[1]][1].memory_free_mib - free)
+            if runner_up - best < AMBIGUOUS_FREE_MIB:
+                ambiguous.append(f"CUDA{cuda_idx}")
 
         _, gpu = remaining.pop(hit)
         mapping[cuda_idx] = gpu.nvml_index
         gpu.cuda_index = cuda_idx
 
-    warning = None
+    notes = []
     if unmatched:
-        warning = "could not match to NVML: " + ", ".join(unmatched)
+        notes.append("could not match to NVML: " + ", ".join(unmatched))
+    if ambiguous:
+        notes.append(
+            f"{', '.join(ambiguous)} could not be pinned to a specific card: identical models "
+            "with free VRAM too close to tell apart. Those CUDA indices are a guess, so do not "
+            "trust per-card figures for them -- load one card (a model, or a full-screen "
+            "window) and re-check to separate them."
+        )
 
     return CudaMapping(
         cuda_to_nvml=mapping,
         raw_output=text[:2000],
         source="llama-server --list-devices",
-        warning=warning,
+        warning=" ".join(notes) if notes else None,
+        ambiguous=tuple(ambiguous),
     )
 
 

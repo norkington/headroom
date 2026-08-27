@@ -261,6 +261,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "cuda_mapping": {
                 "cuda_to_nvml": hr.cuda_mapping.cuda_to_nvml,
                 "resolved": hr.cuda_mapping.resolved,
+                # Resolved says something came back; trustworthy says every
+                # device was pinned to a specific card. On a rig of identical
+                # GPUs those are different answers.
+                "trustworthy": hr.cuda_mapping.trustworthy,
+                "ambiguous": list(hr.cuda_mapping.ambiguous),
                 "source": hr.cuda_mapping.source,
                 "warning": hr.cuda_mapping.warning,
                 # The UI should say this out loud when true. It means nvidia-smi's

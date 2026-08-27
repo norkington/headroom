@@ -60,6 +60,10 @@ export interface Telemetry {
 export interface CudaMapping {
   cuda_to_nvml: Record<string, number>;
   resolved: boolean;
+  /** Resolved AND every device pinned to a specific card. */
+  trustworthy: boolean;
+  /** CUDA indices that could not be told apart from identical cards. */
+  ambiguous: string[];
   source: string;
   warning: string | null;
   /** True when nvidia-smi's numbering and llama.cpp's name different cards. */

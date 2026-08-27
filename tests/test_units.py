@@ -28,6 +28,7 @@ from headroom.gpu import (
     devices_in_use,
     mark_vision_residency,
     order_differs,
+    resolve_cuda_mapping,
 )
 from headroom.registry import RegistryError, build_argv, load
 from headroom.server import ServerState
@@ -307,6 +308,172 @@ def test_unresolved_mapping_is_not_treated_as_agreement() -> None:
     empty = CudaMapping()
     assert empty.resolved is False
     assert order_differs(empty) is False  # nothing known, so nothing claimed
+
+
+# ------------------------------------------------- rigs that are not this one
+#
+# The reconciliation used to match on (name, total VRAM) alone and take the
+# first still-unclaimed card. On a rig of IDENTICAL cards every device matched
+# the first candidate, so the mapping came out as the identity -- whatever
+# llama.cpp had actually said -- and reported itself resolved, with
+# order_differs False and no warning.
+#
+# That is the worst outcome on precisely the machines this exists for. Four
+# 3090s enumerated differently by the two libraries would have had every
+# per-card figure attributed to the wrong physical card, silently.
+
+
+def _fake_llama(tmp_path: Path, lines: list[str]) -> Path:
+    """A stand-in for llama-server that prints the given device lines."""
+    import sys
+
+    if sys.platform == "win32":
+        exe = tmp_path / "llama-server.bat"
+        exe.write_text("@echo off\n" + "".join(f"echo {ln}\n" for ln in lines), encoding="ascii")
+    else:
+        exe = tmp_path / "llama-server"
+        exe.write_text("#!/bin/sh\n" + "".join(f"echo '{ln}'\n" for ln in lines), encoding="ascii")
+        exe.chmod(0o755)
+    return exe
+
+
+def _card(idx: int, name: str, total: int, free: int) -> Gpu:
+    return Gpu(
+        nvml_index=idx,
+        name=name,
+        memory_total_mib=total,
+        memory_used_mib=total - free,
+        memory_free_mib=free,
+    )
+
+
+def test_distinct_cards_reconcile_at_any_count(tmp_path: Path) -> None:
+    """Four cards, llama.cpp enumerating them in the reverse of NVML order."""
+    gpus = [
+        _card(0, "NVIDIA GeForce RTX 3060", 12288, 11000),
+        _card(1, "NVIDIA GeForce RTX 4070 SUPER", 12282, 10000),
+        _card(2, "NVIDIA GeForce RTX 4080", 16376, 15000),
+        _card(3, "NVIDIA GeForce RTX 4090", 24564, 24000),
+    ]
+    exe = _fake_llama(
+        tmp_path,
+        [
+            "  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 24000 MiB free)",
+            "  CUDA1: NVIDIA GeForce RTX 4080 (16376 MiB, 15000 MiB free)",
+            "  CUDA2: NVIDIA GeForce RTX 4070 SUPER (12282 MiB, 10000 MiB free)",
+            "  CUDA3: NVIDIA GeForce RTX 3060 (12288 MiB, 11000 MiB free)",
+        ],
+    )
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    assert m.cuda_to_nvml == {0: 3, 1: 2, 2: 1, 3: 0}
+    assert order_differs(m) is True
+    assert m.ambiguous == ()
+    assert m.trustworthy is True
+
+
+def test_identical_cards_are_pinned_by_free_vram(tmp_path: Path) -> None:
+    """The card that matters is the constrained one, and free VRAM finds it.
+
+    Four 3090s where NVML0 drives the display, and llama.cpp calls that card
+    CUDA3. Getting this wrong points every headroom figure at the wrong card.
+    """
+    gpus = [
+        _card(0, "NVIDIA GeForce RTX 3090", 24576, 21000),  # drives the display
+        _card(1, "NVIDIA GeForce RTX 3090", 24576, 24000),
+        _card(2, "NVIDIA GeForce RTX 3090", 24576, 24000),
+        _card(3, "NVIDIA GeForce RTX 3090", 24576, 24000),
+    ]
+    exe = _fake_llama(
+        tmp_path,
+        [
+            "  CUDA0: NVIDIA GeForce RTX 3090 (24576 MiB, 24000 MiB free)",
+            "  CUDA1: NVIDIA GeForce RTX 3090 (24576 MiB, 24000 MiB free)",
+            "  CUDA2: NVIDIA GeForce RTX 3090 (24576 MiB, 24000 MiB free)",
+            "  CUDA3: NVIDIA GeForce RTX 3090 (24576 MiB, 21000 MiB free)",
+        ],
+    )
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    # The one that is distinguishable is resolved correctly, and the identity
+    # mapping the old code invented would have put it at CUDA0.
+    assert m.cuda_to_nvml[3] == 0
+    assert order_differs(m) is True
+
+
+def test_cards_that_cannot_be_told_apart_are_reported_as_guesses(tmp_path: Path) -> None:
+    """Honest ambiguity beats a confident identity mapping.
+
+    Three of the four 3090s above are genuinely indistinguishable -- same model,
+    same free VRAM -- so those CUDA indices are guesses and must say so.
+    """
+    gpus = [_card(i, "NVIDIA GeForce RTX 3090", 24576, 24000) for i in range(4)]
+    exe = _fake_llama(
+        tmp_path,
+        [f"  CUDA{i}: NVIDIA GeForce RTX 3090 (24576 MiB, 24000 MiB free)" for i in range(4)],
+    )
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    assert m.resolved is True, "a partial mapping would be worse than a flagged one"
+    assert m.trustworthy is False
+    assert len(m.ambiguous) >= 2
+    assert m.warning and "could not be pinned" in m.warning
+
+
+def test_free_vram_within_noise_does_not_count_as_distinguishing(tmp_path: Path) -> None:
+    """The two readings are taken moments apart and drift on their own.
+
+    Desktop compositing alone moves free VRAM by tens of MiB, so a near-tie is a
+    tie -- treating a 12 MiB gap as identification would be false precision.
+    """
+    gpus = [
+        _card(0, "NVIDIA GeForce RTX 3090", 24576, 24000),
+        _card(1, "NVIDIA GeForce RTX 3090", 24576, 23988),
+    ]
+    exe = _fake_llama(
+        tmp_path,
+        [
+            "  CUDA0: NVIDIA GeForce RTX 3090 (24576 MiB, 23994 MiB free)",
+            "  CUDA1: NVIDIA GeForce RTX 3090 (24576 MiB, 23994 MiB free)",
+        ],
+    )
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    assert m.trustworthy is False
+
+
+def test_a_listing_with_no_free_column_still_maps_and_admits_it(tmp_path: Path) -> None:
+    """Older llama.cpp builds print only the total. Nothing left to separate
+    identical cards by, so the mapping is a guess and says so rather than
+    silently reverting to the old behaviour."""
+    gpus = [_card(i, "NVIDIA GeForce RTX 3090", 24576, 24000 - i) for i in range(2)]
+    exe = _fake_llama(
+        tmp_path,
+        [
+            "  CUDA0: NVIDIA GeForce RTX 3090 (24576 MiB)",
+            "  CUDA1: NVIDIA GeForce RTX 3090 (24576 MiB)",
+        ],
+    )
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    assert m.resolved is True
+    assert m.trustworthy is False
+
+
+def test_a_single_card_needs_no_disambiguation(tmp_path: Path) -> None:
+    gpus = [_card(0, "NVIDIA GeForce RTX 4090", 24564, 20000)]
+    exe = _fake_llama(tmp_path, ["  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 20000 MiB free)"])
+
+    m = resolve_cuda_mapping(exe, gpus)
+
+    assert m.cuda_to_nvml == {0: 0}
+    assert m.trustworthy is True
+    assert order_differs(m) is False
 
 
 # ---------------------------------------------------------------- server state
