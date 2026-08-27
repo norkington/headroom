@@ -87,6 +87,12 @@ export function App() {
           {tightest !== null && (
             <> — {totalFree.toLocaleString()} MiB free total, tightest card {tightest.toLocaleString()} MiB</>
           )}
+          {/* Said once at the top as well as per card. The totals line is what
+              gets read at a glance, and it is the line most likely to be
+              mistaken for spare capacity while a projector is resident. */}
+          {gpus.some((g) => g.headroom_provisional) && (
+            <span className="picker-meta"> · still falling, vision loaded</span>
+          )}
         </h2>
         {gpus.length === 0 ? (
           <div className="empty">

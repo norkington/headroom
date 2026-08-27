@@ -9,6 +9,16 @@ import { formatMiB } from "../api";
  *
  * State is encoded three ways on purpose — a severity stripe, a text pill, and
  * colour — so it survives both a glance and colour-blindness.
+ *
+ * A card holding a vision projector gets a second pill. Its free figure is an
+ * upper bound rather than a reading: llama.cpp's image buffer is a retained
+ * high-water mark, so the first large image takes several hundred MiB more and
+ * never gives them back. The grade is not demoted for it — `ok` still means
+ * what it measures, and flattening a 1.3 GiB card into the same bucket as a
+ * 600 MiB one would lose the distinction that decides whether that first image
+ * is survivable — but the number is labelled as unfinished, because reading it
+ * as spare capacity is how the server gets OOMed by something that looked
+ * affordable at the time.
  */
 export function GpuCard({ gpu }: { gpu: Gpu }) {
   const usedPct = gpu.memory_total_mib
@@ -39,7 +49,17 @@ export function GpuCard({ gpu }: { gpu: Gpu }) {
         <span className="value">{value}</span>
         <span className="unit">{unit} free</span>
       </div>
-      <span className="state-pill">{gpu.headroom_state}</span>
+      <div className="state-pills">
+        <span className="state-pill">{gpu.headroom_state}</span>
+        {gpu.headroom_provisional && (
+          <span
+            className="state-pill provisional"
+            title="A vision projector is loaded on this card. llama.cpp's image buffer is a retained high-water mark, not a transient, so this figure is still on its way down."
+          >
+            provisional
+          </span>
+        )}
+      </div>
 
       <div
         className={`meter ${gpu.headroom_state}`}
@@ -70,6 +90,13 @@ export function GpuCard({ gpu }: { gpu: Gpu }) {
           {gpu.temperature_c !== null && "°"}
         </div>
       </div>
+
+      {gpu.headroom_provisional && (
+        <div className="gpu-provisional">
+          Projector resident — the first large image takes several hundred MiB more and never
+          gives them back. Do not spend this.
+        </div>
+      )}
     </article>
   );
 }
