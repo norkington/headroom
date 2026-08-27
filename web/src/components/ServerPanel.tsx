@@ -78,6 +78,7 @@ export function ServerPanel({
   };
 
   const stopped = server.status === "stopped";
+  const loading = server.status === "loading";
   const canStart = stopped && busy === null && chosen !== null && chosen.installed;
   const canStop = (server.status === "running" || server.status === "loading") && busy === null;
 
@@ -227,14 +228,30 @@ export function ServerPanel({
         </div>
       )}
 
-      {server.status === "loading" && (
-        <div className="error-line" style={{ borderLeftColor: "var(--tight)", background: "var(--tight-bg)" }}>
-          Model is loading. The process is up but not serving yet — this takes
-          tens of seconds for a large model. Don&rsquo;t start a second one.
+      {/* Loading is progress, not a fault, and it used to be presented as both:
+          this notice styled as an error, with the raw probe failure printed
+          underneath it. During a normal load that raw text is a 503 from /props
+          plus a link to an HTTP status page, which reads like something broke
+          at exactly the moment nothing has. */}
+      {loading && (
+        <div className="loading-line" role="status" aria-live="polite">
+          <span className="loading-dot" aria-hidden="true" />
+          <div>
+            <strong>Model loading, please wait…</strong>
+            <div className="loading-detail">
+              The process is up and Headroom is watching for it in the background
+              {server.uptime_seconds != null && ` — ${Math.round(server.uptime_seconds)}s so far`}
+              . A large model takes tens of seconds, and it does not answer at all until the
+              weights are resident. Don&rsquo;t start a second one.
+            </div>
+          </div>
         </div>
       )}
 
-      {server.error && <div className="error-line">{server.error}</div>}
+      {/* Suppressed while loading: during that window `error` is the expected
+          probe failure, not a problem, and the notice above already says so.
+          Kept for every other state, where it is the only explanation there is. */}
+      {!loading && server.error && <div className="error-line">{server.error}</div>}
       {error && <div className="error-line">{error}</div>}
     </div>
   );

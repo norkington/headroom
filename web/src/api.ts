@@ -109,13 +109,27 @@ export interface BenchResult {
   n_ctx: number | null;
   context_label: string;
   decode_tok_s: number | null;
+  /**
+   * Spread across every kept run. Deliberately unchanged in meaning: the
+   * registry and every figure bin/bench.ps1 produced are this statistic, so
+   * redefining it would make new numbers incomparable with old ones while
+   * looking identical. The two below separate it for reading.
+   */
   decode_sd: number | null;
+  /** Run-to-run noise, with the workload's own spread taken out. */
+  decode_sd_within: number | null;
+  /** Spread across the task means — how much the number moves with the work. */
+  decode_sd_across: number | null;
   prefill_tok_s: number | null;
   acceptance_range: string | null;
+  acceptance_mean: number | null;
   vram_free_mib: number | null;
   vram_free_breakdown: string | null;
   prefill_cached_runs: number;
   significance_note: string;
+  /** The bench's own prose. Written to models.json, and now also shown. */
+  decode_note: string | null;
+  prefill_note: string | null;
 }
 
 export interface BenchInfo {

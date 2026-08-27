@@ -459,6 +459,10 @@ async def probe_remote(
     Grows the fetch window rather than guessing a single size: most models need
     only a few MB, and a fixed large request wastes bandwidth on all of them.
     """
+    # Normalised here rather than at the call site, so every route into a probe
+    # accepts what a person pastes. A URL left unparsed would be interpolated
+    # straight into the resolve path and fail as a 404 on a file that exists.
+    repo = normalise_repo(repo)
     url = f"{endpoint}/{repo}/resolve/main/{filename}"
     total_size: int | None = None
     last_error: Exception | None = None
@@ -546,6 +550,57 @@ def choose_projector(files: list[dict[str, Any]]) -> str | None:
     return min(projectors, key=rank)["filename"]
 
 
+# What a repository identifier looks like once the noise is off it. The owner is
+# optional: the hub's canonical models predate namespaces and are still served
+# as a bare name -- `gpt2`, `bert-base-uncased`. Requiring owner/name rejected
+# those as "not a HuggingFace repository", which is simply false.
+_REPO_RE = re.compile(r"^[A-Za-z0-9][\w.-]*(/[A-Za-z0-9][\w.-]*)?$")
+
+# Everything a hub URL can carry after the repository name.
+_REPO_SUFFIXES = ("tree", "blob", "resolve", "raw", "commit", "discussions")
+
+
+def normalise_repo(raw: str) -> str:
+    """Turn what people actually paste into ``owner/name``.
+
+    Nobody types a repository identifier. They copy the address bar, and every
+    form of that used to fail in a way that blamed them or blamed the hub:
+
+    - a full URL reported "repository not found", pointing at the repo rather
+      than at the input that was never a repo name;
+    - a URL with ``/tree/main`` on it made the hub return a JSON *list* instead
+      of an object, which crashed on ``.get("siblings")`` and surfaced as
+      "could not reach the hub" -- an outage message for a typo;
+    - a trailing space, which is free when pasting, produced a 401 and the
+      advice to go and accept the repo's terms.
+
+    So the parsing happens here, once, before anything is fetched.
+    """
+    repo = (raw or "").strip()
+    repo = repo.split("?", 1)[0].split("#", 1)[0]
+    repo = re.sub(r"^https?://", "", repo, flags=re.IGNORECASE)
+    repo = re.sub(r"^(www\.)?(huggingface\.co|hf\.co)/", "", repo, flags=re.IGNORECASE)
+    repo = re.sub(r"^models/", "", repo, flags=re.IGNORECASE)
+    repo = repo.strip("/")
+
+    # owner/name/tree/main -> owner/name, and gpt2/tree/main -> gpt2. Cut at the
+    # first known hub path segment rather than at a fixed offset, so both the
+    # namespaced and the bare-name forms survive. Only at a *known* segment:
+    # truncating blindly would quietly accept nonsense as success.
+    parts = repo.split("/")
+    for i, part in enumerate(parts):
+        if i > 0 and part.lower() in _REPO_SUFFIXES:
+            repo = "/".join(parts[:i])
+            break
+
+    if not _REPO_RE.match(repo):
+        raise GgufError(
+            f"{raw.strip()!r} is not a HuggingFace repository. Expected owner/name, "
+            "for example unsloth/Qwen3-8B-GGUF -- a full model-page URL works too."
+        )
+    return repo
+
+
 async def list_repo_files(
     repo: str,
     *,
@@ -553,15 +608,32 @@ async def list_repo_files(
     timeout: float = 30.0,
 ) -> list[dict[str, Any]]:
     """List the GGUF files in a repository, largest first."""
+    repo = normalise_repo(repo)
     url = f"{endpoint}/api/models/{repo}"
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, params={"blobs": "true"})
-        if resp.status_code == 404:
-            raise GgufError(f"repository not found: {repo}")
-        if resp.status_code == 401:
-            raise GgufError(f"{repo} is gated; accept its terms on the model page first")
+        # 401 and 404 are the SAME answer from this hub. A private or missing
+        # repository both come back 401, deliberately -- otherwise the status
+        # code would confirm that a private repo exists. So the message has to
+        # cover both, and the old one ("is gated; accept its terms") sent people
+        # to a terms page for repositories that had simply been mistyped.
+        if resp.status_code in (401, 403, 404):
+            raise GgufError(
+                f"{repo} could not be read. Either it does not exist -- check the spelling -- "
+                "or it is private or gated, in which case accept its terms on the model page "
+                "while signed in."
+            )
         resp.raise_for_status()
         payload = resp.json()
+
+    # The hub returns an object for a repository and a list for a search. Asking
+    # for a URL that is not a repository lands in the second case, and reaching
+    # blindly for .get() raised an AttributeError that the API reported as
+    # "could not reach the hub" -- describing an outage that had not happened.
+    if not isinstance(payload, dict):
+        raise GgufError(
+            f"{repo} did not come back as a repository. Check that owner/name is right."
+        )
 
     files = [
         {

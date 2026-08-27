@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from headroom.gguf import GgufAnalysis
+from headroom.gguf import GgufAnalysis, GgufError, normalise_repo
 from headroom.gpu import (
     _DEVICE_LINE,
     HEADROOM_CRITICAL_MIB,
@@ -214,6 +214,68 @@ def test_the_grade_itself_is_not_demoted_by_a_projector() -> None:
     assert roomy.headroom_state == "ok"
     assert tight.headroom_state == "tight"
     assert roomy.headroom_provisional and tight.headroom_provisional
+
+
+# ------------------------------------------------- what people actually paste
+#
+# Nobody types a repository identifier; they copy the address bar. Every one of
+# these was a real failure, and none of them blamed the input:
+#
+#   a full URL          -> "repository not found"      (blamed the repo)
+#   .../tree/main       -> "could not reach the hub"   (blamed the network; it
+#                                                       was an AttributeError,
+#                                                       the hub returns a list
+#                                                       for that path)
+#   a trailing space    -> "is gated; accept its terms" (blamed the user, and
+#                                                        sent them to a terms
+#                                                        page that did not exist)
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("  unsloth/Qwen3-8B-GGUF  ", "unsloth/Qwen3-8B-GGUF"),
+        ("unsloth/Qwen3-8B-GGUF/", "unsloth/Qwen3-8B-GGUF"),
+        ("https://huggingface.co/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("http://huggingface.co/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("huggingface.co/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("www.huggingface.co/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("hf.co/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("https://huggingface.co/models/unsloth/Qwen3-8B-GGUF", "unsloth/Qwen3-8B-GGUF"),
+        ("https://huggingface.co/unsloth/Qwen3-8B-GGUF/tree/main", "unsloth/Qwen3-8B-GGUF"),
+        ("unsloth/Qwen3-8B-GGUF/blob/main/x.gguf", "unsloth/Qwen3-8B-GGUF"),
+        ("unsloth/Qwen3-8B-GGUF?library=true", "unsloth/Qwen3-8B-GGUF"),
+        ("unsloth/Qwen3-8B-GGUF#files", "unsloth/Qwen3-8B-GGUF"),
+    ],
+)
+def test_a_pasted_model_page_url_is_a_repository(typed: str, expected: str) -> None:
+    assert normalise_repo(typed) == expected
+
+
+@pytest.mark.parametrize("typed", ["gpt2", "bert-base-uncased", "gpt2/tree/main"])
+def test_the_hubs_bare_canonical_names_are_still_repositories(typed: str) -> None:
+    """`gpt2` predates namespaces and is served without an owner.
+
+    An owner/name rule rejected these as "not a HuggingFace repository", which
+    is false — and false in the confident way that makes someone stop looking.
+    """
+    assert normalise_repo(typed) == typed.split("/")[0]
+
+
+@pytest.mark.parametrize("typed", ["", "   ", "/", "//", "https://huggingface.co/", "-bad/name"])
+def test_input_that_is_not_a_repository_says_so_and_shows_the_shape(typed: str) -> None:
+    """The error names the expected form. "Invalid" alone leaves someone
+    guessing at which of several plausible things was wanted."""
+    with pytest.raises(GgufError, match="owner/name"):
+        normalise_repo(typed)
+
+
+def test_a_repo_name_is_not_truncated_at_an_unknown_segment() -> None:
+    """Cutting at any third segment would silently turn a wrong identifier into
+    a plausible one, and report success for a repository nobody asked for."""
+    with pytest.raises(GgufError):
+        normalise_repo("owner/name/something-else")
 
 
 # ---------------------------------------------------------------- cuda order

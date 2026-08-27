@@ -341,6 +341,31 @@ def mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def pooled_within_sd(groups: list[list[float]]) -> float:
+    """Run-to-run noise, with the workload's own spread taken out.
+
+    The headline SD is taken across every kept run, and those runs span three
+    tasks whose draft-acceptance rates genuinely differ -- so most of that
+    number is the tasks, not the machine. Measured here: a pooled SD of 2.27
+    tok/s on a 25.37 mean reads as 9% and looks like an unstable box, while the
+    within-task figure underneath it is about 1.0, or 4%, which is the ~3% this
+    module has always claimed.
+
+    Reporting only the pooled figure invites the reader to dismiss a stable
+    result as noise. Reporting only the within-task figure hides how much the
+    number moves with the workload. Both, labelled, is the honest pair.
+    """
+    ss = 0.0
+    df = 0
+    for group in groups:
+        if len(group) < 2:
+            continue
+        m = sum(group) / len(group)
+        ss += sum((v - m) ** 2 for v in group)
+        df += len(group) - 1
+    return math.sqrt(ss / df) if df else 0.0
+
+
 def context_label(n_ctx: int | None) -> str:
     """`65536` -> `64k`, to match how the registry already names this figure."""
     if not n_ctx:
@@ -468,6 +493,8 @@ class BenchmarkRunner:
                 acceptance_all: list[float] = []
                 task_acceptance: dict[str, float] = {}
 
+                per_task_decodes: dict[str, list[float]] = {}
+
                 for name, prompt in TASKS:
                     b.phase = f"task: {name}"
                     runs: list[Run] = []
@@ -477,6 +504,7 @@ class BenchmarkRunner:
 
                     decodes = [r.decode_tok_s for r in runs if r.decode_tok_s is not None]
                     accepts = [r.acceptance for r in runs if r.acceptance is not None]
+                    per_task_decodes[name] = decodes
                     decode_all += decodes
                     acceptance_all += accepts
                     task_mean_acceptance = mean(accepts)
@@ -509,6 +537,7 @@ class BenchmarkRunner:
             b.result = self._summarise(
                 b,
                 decode_all=decode_all,
+                per_task_decodes=per_task_decodes,
                 acceptance_all=acceptance_all,
                 task_acceptance=task_acceptance,
                 prefill_value=prefill_value,
@@ -671,6 +700,7 @@ class BenchmarkRunner:
         b: Benchmark,
         *,
         decode_all: list[float],
+        per_task_decodes: dict[str, list[float]],
         acceptance_all: list[float],
         task_acceptance: dict[str, float],
         prefill_value: float | None,
@@ -690,6 +720,14 @@ class BenchmarkRunner:
         """
         decode_mean = mean(decode_all)
         decode_sd = stdev(decode_all)
+        # Split, for display only. `decode_sd` itself keeps its original
+        # meaning -- the SD across every kept run -- because every figure
+        # already in the registry and everything bin/bench.ps1 ever produced is
+        # that statistic, and silently redefining it would make new numbers
+        # incomparable with old ones while looking identical.
+        within_sd = pooled_within_sd([g for g in per_task_decodes.values() if g])
+        task_means = [m for m in (mean(g) for g in per_task_decodes.values()) if m is not None]
+        across_sd = stdev(task_means)
 
         measured: dict[str, Any] = {
             "status": (
@@ -711,10 +749,21 @@ class BenchmarkRunner:
                 for name, value in task_acceptance.items()
             )
             measured["mtp_acceptance_range"] = f"{lo:.3f} - {hi:.3f}"
-            measured["decode_note"] = (
+            note = (
                 f"Decode tracks MTP draft acceptance, which ranged {lo:.3f}-{hi:.3f} across the "
                 f"three bench tasks ({spread}). Read decode WITH acceptance, never alone."
             )
+            # The split goes in the prose rather than into new `measured` keys:
+            # it is an explanation of the SD already recorded, not a second
+            # measurement, and the registry is shared with the user's scripts.
+            if decode_mean:
+                note += (
+                    f" The recorded SD of {decode_sd:.2f} is mostly those task differences, not "
+                    f"instrument noise: within a single task the spread is about "
+                    f"{within_sd:.2f} tok/s ({within_sd / decode_mean * 100:.0f}%), while across "
+                    f"the task means it is {across_sd:.2f}."
+                )
+            measured["decode_note"] = note
 
         if prefill_value is not None:
             measured["prefill_tok_s"] = round(prefill_value, 1)
@@ -755,17 +804,52 @@ class BenchmarkRunner:
             "vram_free_breakdown": vram_breakdown,
             "decode_tok_s": measured.get("decode_tok_s"),
             "decode_sd": measured.get("decode_sd"),
+            # For the panel: the same spread, separated into the half that is
+            # the machine and the half that is the workload.
+            "decode_sd_within": round(within_sd, 2) if decode_mean is not None else None,
+            "decode_sd_across": round(across_sd, 2) if decode_mean is not None else None,
+            "acceptance_mean": _round(mean(acceptance_all), 3),
+            "decode_note": measured.get("decode_note"),
+            "prefill_note": measured.get("prefill_note"),
             "prefill_tok_s": measured.get("prefill_tok_s"),
             "acceptance_range": measured.get("mtp_acceptance_range"),
             "prefill_cached_runs": prefill_cached,
-            # Repeated here so the UI can show it next to the result without
-            # having to know the rule. A reader who sees only "27.6 vs 26.1"
-            # will call it a regression; one who sees the SD will not.
-            "significance_note": (
-                "Run-to-run SD is around 3% on this class of machine. A difference under ~6% "
-                "between two configurations is not a result."
-            ),
+            # Derived from THIS run rather than asserted as a constant. The
+            # panel now shows the measured within-task spread beside it, and a
+            # hardcoded "around 3%" sitting next to a measured 5% is the kind of
+            # stale claim this module exists to avoid. The rule is unchanged --
+            # roughly twice the run-to-run spread -- it is just no longer a
+            # number someone has to trust.
+            "significance_note": _significance_note(decode_mean, within_sd),
         }
+
+
+def _significance_note(decode_mean: float | None, within_sd: float) -> str:
+    """How big a difference has to be before it means anything, from this run.
+
+    The threshold has always been about twice the run-to-run spread. What
+    changes here is that the spread is the one just measured rather than a
+    remembered ~3%, so the sentence cannot drift away from the data printed
+    next to it.
+    """
+    # A spread at or near zero is not a perfect instrument, it is too few runs
+    # to have seen the variation -- three reps of a task can land identically by
+    # luck. Deriving a threshold from it would advertise that any difference at
+    # all is meaningful, which is the exact overconfidence this note exists to
+    # prevent, so fall back to the standing rule.
+    if not decode_mean or within_sd < decode_mean * 0.005:
+        return (
+            "Run-to-run SD is around 3% on this class of machine. A difference under ~6% "
+            "between two configurations is not a result. (This run's own spread was too "
+            "small to derive a threshold from -- with three reps that means unmeasured, "
+            "not absent.)"
+        )
+    pct = within_sd / decode_mean * 100
+    return (
+        f"Run-to-run spread within a single task was {within_sd:.2f} tok/s ({pct:.0f}%) on this "
+        f"run. Two configurations differing by less than roughly twice that -- about "
+        f"{2 * within_sd:.1f} tok/s -- are not distinguishable by this benchmark."
+    )
 
 
 def _today() -> str:

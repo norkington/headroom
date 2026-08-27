@@ -26,6 +26,12 @@ import { getJSON, postJSON } from "../api";
  * - **The write is stated, with its backup.** This writes to a file shared with
  *   the user's shell scripts; that should never be something they discover
  *   afterwards.
+ *
+ * - **The bench's own prose is shown, not just filed.** Every note here is
+ *   already written into models.json, where it is read months later by someone
+ *   who was not present for the run. It was not being shown to the person
+ *   standing in front of the result, who needs it more: the figures that get
+ *   misread are misread at the moment they appear.
  */
 
 const POLL_MS = 1000;
@@ -209,25 +215,40 @@ export function BenchPanel({
             <div>
               <span className="k">decode</span>
               {num(result.decode_tok_s, 2, " tok/s")}
-              {result.decode_sd != null && (
-                <span className="picker-meta"> ± {result.decode_sd.toFixed(2)} SD</span>
+              {/* Split, because the pooled figure reads as instability. Most of
+                  it is the three tasks differing, not the machine wobbling. */}
+              {result.decode_sd_within != null && result.decode_sd_across != null ? (
+                <span className="fig-sub">
+                  ± {result.decode_sd_within.toFixed(2)} run-to-run · ±{" "}
+                  {result.decode_sd_across.toFixed(2)} across tasks
+                </span>
+              ) : (
+                result.decode_sd != null && (
+                  <span className="fig-sub">± {result.decode_sd.toFixed(2)} SD</span>
+                )
               )}
             </div>
             <div>
               <span className="k">prefill</span>
               {num(result.prefill_tok_s, 1, " tok/s")}
+              <span className="fig-sub">~6k-token prompt</span>
             </div>
             <div>
               <span className="k">acceptance</span>
-              {result.acceptance_range ?? "n/a"}
+              {result.acceptance_mean != null ? result.acceptance_mean.toFixed(3) : "n/a"}
+              {result.acceptance_range && (
+                <span className="fig-sub">{result.acceptance_range} by task</span>
+              )}
             </div>
             <div>
               <span className="k">context</span>
               {result.n_ctx?.toLocaleString() ?? "—"}
+              <span className="fig-sub">from the running server</span>
             </div>
             <div>
               <span className="k">free vram</span>
               {result.vram_free_mib != null ? `${result.vram_free_mib} MiB` : "—"}
+              <span className="fig-sub">nothing else on the cards</span>
             </div>
           </div>
 
@@ -235,8 +256,22 @@ export function BenchPanel({
               "free" can be one comfortable card and one that is a browser tab
               away from an OOM. */}
           {result.vram_free_breakdown && (
-            <div className="picker-meta" style={{ marginTop: 8, display: "block" }}>
-              {result.vram_free_breakdown}
+            <div className="bench-caption">
+              {result.vram_free_breakdown}. Measured with this model resident and the server
+              idle — it describes the whole machine at that moment, not the model, so anything
+              else you open moves it.
+            </div>
+          )}
+
+          {/* Acceptance is the figure most likely to be read without knowing
+              what good looks like. It is bounded 0-1, it is what decode
+              tracks, and below roughly 0.3 speculative decoding stops paying
+              for its own overhead. */}
+          {result.acceptance_mean != null && (
+            <div className="bench-caption">
+              Acceptance is the share of speculatively drafted tokens the model kept — decode
+              moves with it, which is why the two are never shown apart. Below about 0.3 the
+              draft head stops earning its overhead.
             </div>
           )}
 
@@ -263,11 +298,25 @@ export function BenchPanel({
             </table>
           )}
 
-          <div className="finding info">
-            <div className="finding-detail">
-              {result.significance_note} Decode moves <em>with</em> acceptance, so check that
-              before reading a difference between tasks as a property of the model.
+          {/* Written into models.json by the run itself. Shown here rather than
+              only filed: the moment someone is about to compare two numbers is
+              the moment they need the caveat. */}
+          {result.decode_note && (
+            <div className="finding info">
+              <div className="finding-title">What the decode figure means</div>
+              <div className="finding-detail">{result.decode_note}</div>
             </div>
+          )}
+
+          {result.prefill_note && (
+            <div className="finding info">
+              <div className="finding-title">What the prefill figure means</div>
+              <div className="finding-detail">{result.prefill_note}</div>
+            </div>
+          )}
+
+          <div className="finding info">
+            <div className="finding-detail">{result.significance_note}</div>
           </div>
 
           {result.prefill_tok_s == null && (

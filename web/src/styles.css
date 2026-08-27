@@ -669,6 +669,64 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
   color: var(--ink-3);
 }
 
+/*
+ * Loading reads as progress, not as a fault. Deliberately not the error
+ * treatment: a red or amber bar during a perfectly normal 20-second load is how
+ * a user learns to distrust the panel.
+ */
+.loading-line {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  background: var(--surface-2);
+  font-size: 0.84rem;
+}
+.loading-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: loading-pulse 1.4s ease-in-out infinite;
+}
+@keyframes loading-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50%      { opacity: 1;    transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading-dot { animation: none; opacity: 0.9; }
+}
+.loading-detail {
+  margin-top: 4px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+/*
+ * A figure's own footnote, under the number rather than beside it. The headline
+ * stays scannable; the caveat is there for whoever is about to act on it.
+ */
+.fig-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.bench-caption {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
 .bench-history { margin-top: 14px; border-top: 1px solid var(--rule); }
 .bench-history > summary {
   cursor: pointer;

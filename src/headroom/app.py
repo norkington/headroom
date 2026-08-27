@@ -442,6 +442,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pick, and it will fail late -- at load, not at selection.
         """
         try:
+            # Normalised first so the response can echo what was actually
+            # queried. A pasted model-page URL is the common input, and showing
+            # it back unchanged leaves the user unsure whether it was understood.
+            repo = gguf_mod.normalise_repo(repo)
             files = await gguf_mod.list_repo_files(repo)
         except gguf_mod.GgufError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
