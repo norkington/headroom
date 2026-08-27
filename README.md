@@ -254,8 +254,12 @@ uv run ruff format --check src tests
 
 `test_units.py`, `test_bench.py` and `test_persistence.py` are portable and run
 anywhere. `test_argv_parity.py` checks the generated command line against a real
-shell launcher's dry-run output, so it needs a local llama.cpp install and skips
-cleanly without one.
+shell launcher's own dry-run output, so it needs one — and skips cleanly, saying
+which paths it looked for, when there isn't one. Point it at yours with:
+
+```bash
+HEADROOM_PARITY_REGISTRY=/path/to/models.json HEADROOM_PARITY_LAUNCHER=/path/to/serve.ps1 uv run pytest
+```
 
 ---
 

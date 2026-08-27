@@ -15,10 +15,21 @@ matter. Values are compared exactly.
 
 Skips cleanly when the local launcher or registry is absent, so the suite still
 runs on a contributor's machine that has neither.
+
+The three paths below are the author's layout as defaults and are overridable by
+environment variable, because a test that hardcodes one machine's directories
+would be the same works-on-one-computer assumption that :mod:`headroom.config`
+exists to remove. Anyone with a launcher of their own can point this at it:
+
+    HEADROOM_PARITY_REGISTRY=... HEADROOM_PARITY_LAUNCHER=... uv run pytest
+
+Defaults rather than a plain skip, so the contract keeps being checked on the
+machine it was written against without anyone remembering to set anything.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,9 +38,25 @@ import pytest
 
 from headroom.registry import build_argv, load
 
-REGISTRY = Path(r"C:\AI\models\models.json")
-LAUNCHER = Path(r"C:\AI\models\bin\serve.ps1")
-LLAMA_SERVER = Path(r"C:\src\llama.cpp\build\bin\Release\llama-server.exe")
+
+def _path_from_env(name: str, default: str) -> Path:
+    """An overridable path, with surrounding whitespace removed.
+
+    Stripped for the same reason `headroom.config` strips: a trailing space is
+    easy to produce on Windows and nearly invisible, and every path derived from
+    the value inherits it.
+    """
+    raw = os.environ.get(name) or ""
+    return Path(raw.strip() or default)
+
+
+REGISTRY = _path_from_env("HEADROOM_PARITY_REGISTRY", r"C:\AI\models\models.json")
+LAUNCHER = _path_from_env("HEADROOM_PARITY_LAUNCHER", r"C:\AI\models\bin\serve.ps1")
+# Only ever argv[0]: the comparison is flag by flag and never looks at the
+# executable, so this one does not need to exist for the test to be meaningful.
+LLAMA_SERVER = _path_from_env(
+    "HEADROOM_PARITY_LLAMA_SERVER", r"C:\src\llama.cpp\build\bin\Release\llama-server.exe"
+)
 
 # Flags that take no value; everything else is assumed to be `--flag value`.
 BOOLEAN_FLAGS = {"--jinja", "--no-mmap", "--verbose"}
@@ -115,7 +142,14 @@ def test_output_with_no_command_line_yields_nothing_rather_than_junk() -> None:
 
 needs_local = pytest.mark.skipif(
     not (REGISTRY.exists() and LAUNCHER.exists() and shutil.which("powershell")),
-    reason="local registry / shell launcher not present",
+    # Naming the paths and the overrides, because "skipped" otherwise looks the
+    # same whether the launcher is missing or the test is pointed at the wrong
+    # place -- and those need different fixes.
+    reason=(
+        f"needs a shell launcher to compare against: registry {REGISTRY} "
+        f"and launcher {LAUNCHER} (override with HEADROOM_PARITY_REGISTRY / "
+        "HEADROOM_PARITY_LAUNCHER)"
+    ),
 )
 
 
