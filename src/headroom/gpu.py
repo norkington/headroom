@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 HEADROOM_CRITICAL_MIB = 500
 HEADROOM_TIGHT_MIB = 1200
 
+# How llama.cpp is told which devices to use. Both spellings are accepted by
+# llama-server, and a command line carrying neither means every visible device.
+_DEVICE_FLAGS = ("-dev", "--device")
+
 
 @dataclass(slots=True)
 class Gpu:
@@ -60,6 +64,11 @@ class Gpu:
     # rather than a guess -- callers must not invent a mapping.
     cuda_index: int | None = None
 
+    # Set by mark_vision_residency(): a multimodal projector is loaded on this
+    # card right now. Not a property of the hardware, so it is filled in by the
+    # caller that knows what is serving, the same way cuda_index is.
+    vision_resident: bool = False
+
     @property
     def headroom_state(self) -> str:
         """`critical` | `tight` | `ok`, graded per-card, not against the total."""
@@ -70,11 +79,89 @@ class Gpu:
         return "ok"
 
     @property
+    def headroom_provisional(self) -> bool:
+        """Whether this card's free figure is still on its way down.
+
+        A resident vision projector makes the number above an **upper bound**
+        rather than a reading. The image buffer llama.cpp allocates is a
+        retained high-water mark, not a transient: it grows the first time a
+        large image is processed and is never given back for the life of the
+        server. Measured on this project's development box, one 4K image took a
+        card from 578 MiB free to 170 MiB and left it there.
+
+        So a vision-loaded card sitting comfortably above the tight line has not
+        finished falling, and reading its headroom as spare capacity -- starting
+        a game, a diffusion run, a second model -- is how the server gets OOMed
+        mid-generation by something that looked affordable at the time.
+
+        The grade itself is deliberately NOT demoted. `ok` and `tight` still mean
+        what they measure, and collapsing a 1.3 GiB card into the same bucket as
+        a 600 MiB one would throw away the distinction that decides whether the
+        first large image is survivable at all. What changes is that the figure
+        is labelled as unfinished. A card already `critical` gets no label: there
+        is no worse grade to warn about, and the warning would only dilute one
+        that already says everything.
+        """
+        return self.vision_resident and self.headroom_state != "critical"
+
+    @property
     def label(self) -> str:
         """How to name this card in the UI, without inventing a CUDA index."""
         if self.cuda_index is None:
             return f"{self.name} (nvml {self.nvml_index})"
         return f"{self.name} (CUDA{self.cuda_index})"
+
+
+def devices_in_use(command_line: list[str]) -> list[int] | None:
+    """CUDA indices named by `-dev`, or None when the command line names none.
+
+    None is not an empty list. A server started without the flag uses every
+    visible device, so "nothing named" and "nothing used" are opposite claims
+    and must not share a representation.
+    """
+    for i, arg in enumerate(command_line):
+        if arg in _DEVICE_FLAGS and i + 1 < len(command_line):
+            value = command_line[i + 1]
+        elif any(arg.startswith(f"{flag}=") for flag in _DEVICE_FLAGS):
+            value = arg.split("=", 1)[1]
+        else:
+            continue
+        indices = []
+        for part in value.split(","):
+            part = part.strip()
+            if part.upper().startswith("CUDA") and part[4:].isdigit():
+                indices.append(int(part[4:]))
+        return indices or None
+    return None
+
+
+def mark_vision_residency(
+    cards: list[Gpu], *, vision: bool, command_line: list[str] | None = None
+) -> None:
+    """Flag the cards a multimodal projector is currently loaded on.
+
+    When the server names its devices and every named one resolves to a card,
+    exactly those are flagged. Otherwise **every** card is, for two reasons that
+    point the same way: a llama-server started without `-dev` really does use all
+    of them, and an unresolved CUDA mapping means Headroom cannot rule any card
+    out. Under-warning here costs someone a server mid-generation; over-warning
+    costs them a label.
+    """
+    for card in cards:
+        card.vision_resident = False
+    if not vision:
+        return
+
+    named = devices_in_use(command_line or [])
+    if named is not None:
+        by_cuda = {c.cuda_index: c for c in cards if c.cuda_index is not None}
+        if all(index in by_cuda for index in named):
+            for index in named:
+                by_cuda[index].vision_resident = True
+            return
+
+    for card in cards:
+        card.vision_resident = True
 
 
 class GpuBackend(Protocol):

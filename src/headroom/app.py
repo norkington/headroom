@@ -242,9 +242,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def gpus() -> dict[str, Any]:
         hr: State = app.state.hr
         cards = hr.gpus()
+        # Probed here as well as in the stream, at the cost of one round trip on
+        # a one-off request. A card's figure being provisional is part of what
+        # that figure means, and an endpoint that quietly omitted it would be
+        # handing out the optimistic half.
+        state = await server_mod.probe(settings.port)
+        gpu_mod.mark_vision_residency(cards, vision=state.vision, command_line=state.command_line)
         return {
             "gpus": [
-                asdict(g) | {"headroom_state": g.headroom_state, "label": g.label} for g in cards
+                asdict(g)
+                | {
+                    "headroom_state": g.headroom_state,
+                    "headroom_provisional": g.headroom_provisional,
+                    "label": g.label,
+                }
+                for g in cards
             ],
             "cuda_mapping": {
                 "cuda_to_nvml": hr.cuda_mapping.cuda_to_nvml,
@@ -269,6 +281,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while True:
                 cards = hr.gpus()
                 state = await server_mod.probe(settings.port)
+                # Which cards are holding a projector, and are therefore still
+                # on their way down. Done per poll rather than once, because a
+                # vision server can be started and stopped under a UI that stays
+                # open -- that is the whole point of attaching rather than owning.
+                gpu_mod.mark_vision_residency(
+                    cards, vision=state.vision, command_line=state.command_line
+                )
                 payload = {
                     "gpus": [
                         {
@@ -280,6 +299,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "memory_used_mib": g.memory_used_mib,
                             "memory_free_mib": g.memory_free_mib,
                             "headroom_state": g.headroom_state,
+                            "vision_resident": g.vision_resident,
+                            "headroom_provisional": g.headroom_provisional,
                             "utilization_pct": g.utilization_pct,
                             "power_watts": g.power_watts,
                             "temperature_c": g.temperature_c,

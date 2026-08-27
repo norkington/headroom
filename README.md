@@ -29,6 +29,16 @@ the model say" but:
   and is one browser tab away from OOMing the server mid-generation. Totals lie;
   Headroom grades each card on its own.
 
+  Totals lie about *when*, too. A card holding a vision projector is marked
+  **provisional**, because llama.cpp's image buffer is a retained high-water
+  mark rather than a transient: it grows the first time a large image is
+  processed and is never given back for the life of the server. One 4K image
+  took a card here from 578 MiB free to 170 MiB and left it there. The grade is
+  not demoted for it — `ok` still means what it measures, and flattening a 1.3
+  GiB card into the same bucket as a 600 MiB one would lose the distinction that
+  decides whether that first image is survivable — but the figure is labelled as
+  an upper bound, so it is not mistaken for spare capacity.
+
 - **Which card does llama.cpp call `CUDA0`?** NVML and `nvidia-smi` enumerate by
   PCI bus. llama.cpp uses the CUDA runtime's FASTEST_FIRST order. When those
   disagree — a fast card in a later slot — `-dev CUDA0` and `nvidia-smi -i 0`

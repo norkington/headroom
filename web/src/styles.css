@@ -637,6 +637,38 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
 .dl-earlier > summary:hover { color: var(--ink-2); }
 .dl-earlier[open] > summary { margin-bottom: 8px; }
 
+/*
+ * A card whose free figure is still on its way down. Deliberately NOT another
+ * severity colour: it is not a worse grade, it is a note about the grade beside
+ * it, so it reads as an annotation rather than competing with the stripe.
+ */
+.state-pills {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  /* The gap before the meter used to come from the pill's own margin. It moves
+     here so a second pill does not double it. */
+  margin-bottom: 12px;
+}
+.state-pills .state-pill { margin-bottom: 0; }
+/* Qualified with .gpu so it beats `.state-ok .state-pill` on specificity rather
+   than on source order, which a reshuffle would silently reverse. */
+.gpu .state-pill.provisional {
+  background: transparent;
+  color: var(--ink-3);
+  border: 1px dashed var(--rule);
+  cursor: help;
+}
+.gpu-provisional {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--rule);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
 .bench-history { margin-top: 14px; border-top: 1px solid var(--rule); }
 .bench-history > summary {
   cursor: pointer;

@@ -20,6 +20,15 @@ export interface Gpu {
   memory_used_mib: number;
   memory_free_mib: number;
   headroom_state: HeadroomState;
+  /** A multimodal projector is loaded on this card right now. */
+  vision_resident: boolean;
+  /**
+   * Whether the free figure is an upper bound rather than a reading. True while
+   * a projector is resident and the card is not already `critical`: llama.cpp's
+   * image buffer is a retained high-water mark, so the number is still on its
+   * way down and must not be read as spare capacity.
+   */
+  headroom_provisional: boolean;
   utilization_pct: number | null;
   power_watts: number | null;
   temperature_c: number | null;

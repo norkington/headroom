@@ -25,6 +25,8 @@ from headroom.gpu import (
     HEADROOM_TIGHT_MIB,
     CudaMapping,
     Gpu,
+    devices_in_use,
+    mark_vision_residency,
     order_differs,
 )
 from headroom.registry import RegistryError, build_argv, load
@@ -88,6 +90,130 @@ def test_label_never_invents_a_cuda_index() -> None:
 
     unmapped.cuda_index = 1
     assert "CUDA1" in unmapped.label
+
+
+# ------------------------------------------------------- vision residency
+#
+# A resident projector makes a card's free figure an upper bound rather than a
+# reading: llama.cpp's image buffer is a retained high-water mark, so it grows
+# with the first large image and is never given back. Measured on the
+# development box, one 4K image took a card from 578 MiB free to 170 MiB and
+# left it there. A card sitting comfortably above the tight line while holding a
+# projector has therefore not finished falling, and reading its headroom as
+# spare capacity is how the server gets OOMed by something that looked
+# affordable at the time.
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["-m", "x.gguf", "-dev", "CUDA0,CUDA1"], [0, 1]),
+        (["-m", "x.gguf", "--device", "CUDA1"], [1]),
+        (["-m", "x.gguf", "--device=CUDA1"], [1]),
+        (["-m", "x.gguf", "-dev", "CUDA1, CUDA0"], [1, 0]),
+    ],
+)
+def test_the_device_list_is_read_off_the_command_line(argv, expected) -> None:
+    assert devices_in_use(argv) == expected
+
+
+def test_naming_no_devices_is_not_the_same_as_naming_none() -> None:
+    """`None` and `[]` are opposite claims and must not share a spelling.
+
+    A server started without the flag uses every visible device. Returning an
+    empty list would say the opposite -- that it uses nothing -- and every card
+    would go unmarked on exactly the command line that puts a projector on all
+    of them.
+    """
+    assert devices_in_use(["-m", "x.gguf"]) is None
+    assert devices_in_use([]) is None
+
+
+def test_a_projector_is_pinned_to_the_cards_it_is_actually_on() -> None:
+    """And on this hardware that is not the card the index suggests.
+
+    CUDA0 is the second NVML device here, which is the reversed order the whole
+    mapping exists for. Marking by NVML index would put the warning on the wrong
+    card -- the one thing worse than not warning.
+    """
+    cards = [
+        make_gpu(nvml_index=0, name="NVIDIA GeForce RTX 3060", cuda_index=1),
+        make_gpu(nvml_index=1, name="NVIDIA GeForce RTX 4070 SUPER", cuda_index=0),
+    ]
+
+    mark_vision_residency(cards, vision=True, command_line=["-dev", "CUDA0"])
+
+    assert [c.vision_resident for c in cards] == [False, True]
+
+
+def test_a_server_that_names_no_devices_is_holding_all_of_them() -> None:
+    cards = [make_gpu(nvml_index=0, cuda_index=0), make_gpu(nvml_index=1, cuda_index=1)]
+
+    mark_vision_residency(cards, vision=True, command_line=["-m", "x.gguf"])
+
+    assert all(c.vision_resident for c in cards)
+
+
+def test_an_unresolved_mapping_warns_about_every_card() -> None:
+    """Under-warning costs a server mid-generation; over-warning costs a label.
+
+    Without a CUDA mapping Headroom cannot rule any card out, and the same is
+    true when the command line names a device that does not resolve to one. Both
+    resolve towards the warning.
+    """
+    unmapped = [make_gpu(nvml_index=0), make_gpu(nvml_index=1)]
+    mark_vision_residency(unmapped, vision=True, command_line=["-dev", "CUDA0"])
+    assert all(c.vision_resident for c in unmapped)
+
+    stranger = [make_gpu(nvml_index=0, cuda_index=0)]
+    mark_vision_residency(stranger, vision=True, command_line=["-dev", "CUDA0,CUDA3"])
+    assert stranger[0].vision_resident
+
+
+def test_stopping_the_server_clears_the_mark() -> None:
+    """The UI stays open across a start and a stop, so this is not a fresh list.
+
+    A stale mark would keep telling someone their headroom is still falling on a
+    box where nothing is loaded, which spends the warning's credibility on a
+    card that is genuinely free.
+    """
+    cards = [make_gpu(nvml_index=0, cuda_index=0)]
+    mark_vision_residency(cards, vision=True, command_line=[])
+    assert cards[0].vision_resident
+
+    mark_vision_residency(cards, vision=False, command_line=[])
+    assert not cards[0].vision_resident
+
+
+@pytest.mark.parametrize(
+    ("free", "expected"),
+    [(11282, True), (900, True), (400, False)],
+)
+def test_a_critical_card_is_not_also_called_provisional(free: int, expected: bool) -> None:
+    """There is no worse grade to warn about, and the warning would dilute one
+    that already says everything."""
+    card = make_gpu(memory_free_mib=free, vision_resident=True)
+    assert card.headroom_provisional is expected
+
+
+def test_nothing_is_provisional_without_a_projector() -> None:
+    assert make_gpu(memory_free_mib=1300).headroom_provisional is False
+
+
+def test_the_grade_itself_is_not_demoted_by_a_projector() -> None:
+    """Deliberate. `ok` still means what it measures.
+
+    Collapsing a 1.3 GiB card into the same bucket as a 600 MiB one would throw
+    away the distinction that decides whether the first large image is
+    survivable at all -- which is precisely the question the label is there to
+    raise.
+    """
+    roomy = make_gpu(memory_free_mib=1300, vision_resident=True)
+    tight = make_gpu(memory_free_mib=600, vision_resident=True)
+
+    assert roomy.headroom_state == "ok"
+    assert tight.headroom_state == "tight"
+    assert roomy.headroom_provisional and tight.headroom_provisional
 
 
 # ---------------------------------------------------------------- cuda order
