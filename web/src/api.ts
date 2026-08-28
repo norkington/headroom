@@ -96,6 +96,12 @@ export interface ModelSummary {
   vision_supported: boolean;
   /** Whether the vision profile is a measured operating point, or only a flag. */
   vision_tuned: boolean;
+  /**
+   * The vision profile as the registry holds it — `ctx` and `split` included.
+   * Its `ctx` is the one `build_argv` uses for a vision start, and it is not
+   * the same number as `serve.ctx`.
+   */
+  vision: Record<string, unknown>;
   mmproj: string | null;
   why_this_build: string[];
   serve: Record<string, unknown>;

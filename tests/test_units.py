@@ -692,6 +692,46 @@ def test_explicit_override_beats_the_vision_profile(fake_registry: Path) -> None
     assert argv[argv.index("--ctx-size") + 1] == "16384"
 
 
+def test_the_models_payload_carries_the_context_a_vision_start_would_use(
+    monkeypatch, tmp_path: Path, fake_registry: Path
+) -> None:
+    """The number the picker shows and the one that reaches --ctx-size, together.
+
+    The panel says what a Start would load before it loads it, and this payload
+    is the only thing it can say it from. It used to read a `serve.vision_ctx`
+    key the registry has never had, so ticking vision displayed the *text*
+    context while the launch quietly used the profile's -- the exact shape of
+    disagreement `build_argv`'s docstring exists to prevent, arrived at from the
+    other end. Asserting the resolution rule rather than the fixture's number is
+    what keeps the two from drifting apart again.
+    """
+    from fastapi.testclient import TestClient
+
+    from headroom.app import Settings, create_app
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("HEADROOM_REGISTRY", str(fake_registry))
+    monkeypatch.chdir(tmp_path)
+
+    with TestClient(create_app(Settings.resolve())) as client:
+        payload = client.get("/api/models")
+        assert payload.status_code == 200, payload.text
+        entry = next(m for m in payload.json()["models"] if m["key"] == "demo")
+
+    assert entry["vision"]["ctx"] == 4096, "the profile itself has to cross the wire"
+    assert entry["serve"]["ctx"] == 8192, "and it is a different number from the text one"
+
+    reg = load(fake_registry)
+    for vision in (False, True):
+        # The same precedence the picker applies, checked against what would
+        # actually be launched.
+        shown = (vision and entry["vision"].get("ctx")) or entry["serve"]["ctx"]
+        argv = build_argv(reg.get("demo"), "llama-server", vision=vision)
+        assert str(shown) == argv[argv.index("--ctx-size") + 1], (
+            f"picker and launcher disagree with vision={vision}"
+        )
+
+
 def test_large_micro_batch_with_mtp_is_refused(fake_registry: Path) -> None:
     reg = load(fake_registry)
     with pytest.raises(RegistryError, match="micro-batch"):
