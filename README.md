@@ -44,6 +44,8 @@ loudly.
 | **Judges a quant before you download it** | Reads a remote GGUF's tensor table over a ranged request — 24 MiB to assess 15 GiB. |
 | **Starts, attaches to and stops llama-server** | Spawned *detached*. Closing the UI never unloads your model. |
 | **Benchmarks the running model** | Warm-up discarded, prefill measured separately, results written back to your registry. |
+| **Finds your context ceiling** | Tries real loads until it finds the largest context that still leaves every card above a margin. |
+| **Flags thermal throttling** | Graded against each card's own slowdown threshold, and recorded against any benchmark that ran while it was happening. |
 | **Resumable downloads** | Stall-detecting, and they survive a restart of the backend. |
 
 If you want chat, use Open WebUI, LM Studio, Jan or KoboldCpp — they are good at
@@ -67,6 +69,13 @@ So the figure above is an upper bound, not a reading. The grade is deliberately
 1.3 GiB card into the same bucket as a 600 MiB one would lose the distinction
 that decides whether that first image is survivable at all. What changes is that
 the number is labelled unfinished, so it is not mistaken for spare capacity.
+
+A card that is thermally throttling is flagged the same way, and graded against
+**its own** slowdown threshold rather than a fixed temperature — the two cards
+here clamp at 95 °C and 96 °C, so any hardcoded number would be wrong on at least
+one of them. Throttling outranks the reading, because a clamped card *cools* while
+its throughput collapses. A benchmark that ran while it was happening says so:
+those figures measured the cooling as much as the model.
 
 ---
 
@@ -112,6 +121,49 @@ now*, because the card is already holding a model.
 Vision projectors are listed apart from the quants rather than alongside them.
 Both are `.gguf`, and a projector picked as a model fails at load rather than at
 the point you chose it.
+
+---
+
+## How big a context does this machine actually hold?
+
+Your registry records a context length. Nothing verifies it — and on the machine
+this was built on, the recorded 64K turned out to leave the tightest card at
+**1,012 MiB free**, below the very threshold the GPU panel grades as *tight*.
+
+```console
+$ curl -s -X POST '127.0.0.1:7315/api/ceiling/start?model=qwen38-unleashed'
+```
+
+```
+ctx  65,536   13.4s   free  1012 MiB   loaded, below margin
+ctx  32,768   13.6s   free  2068 MiB   within margin
+ctx  59,392   13.6s   free  1210 MiB   within margin   <- ceiling
+```
+
+Three real loads, 40 seconds. Each candidate is **started, waited for, measured
+and stopped** — because KV arithmetic is close but it is not the whole
+allocation, and what the rest of it produces is a server that exits during
+startup rather than a number that comes out slightly high.
+
+The target is deliberately *not* the largest context that loads. A context that
+fits with 200 MiB to spare is one browser tab away from an OOM mid-generation,
+which is the failure this whole project exists to prevent. So the search looks
+for the largest context that still leaves **every** card above a margin, and the
+margin defaults to the same threshold the GPU panel grades against — the answer
+agrees with the colour you are already looking at. Pass `?margin_mib=` to move it.
+
+If your registry records `kv_bytes_per_token` it seeds the first step, which
+typically halves the number of loads. It is only a seed: two real probes replace
+it with a slope measured on your hardware, so a stale or wrong value costs time
+rather than correctness. Note that a recorded figure is a *total* while what
+binds is *per card* — on a two-card split the observed slope here was 0.0322
+MiB/token against a recorded 0.0625.
+
+**Nothing is written to your registry.** A benchmark observes the configuration
+you have, so recording it is bookkeeping. A ceiling search proposes a *different*
+one, and that is a decision rather than a measurement — so it hands you the
+evidence and stops. It also refuses to run while a server is up, because it
+cycles llama-server repeatedly and will not unload a model you are using.
 
 ---
 
