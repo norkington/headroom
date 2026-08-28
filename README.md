@@ -1,4 +1,6 @@
-<h1 align="center">Headroom</h1>
+<h1 align="center">
+  <img alt="Headroom" src="docs/masthead.png" width="760">
+</h1>
 
 <p align="center">
   <strong>An operations console for running large language models on constrained consumer GPUs.</strong><br>
