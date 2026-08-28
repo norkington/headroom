@@ -23,6 +23,11 @@ from headroom.gpu import (
     _DEVICE_LINE,
     HEADROOM_CRITICAL_MIB,
     HEADROOM_TIGHT_MIB,
+    THROTTLE_APP_CLOCKS,
+    THROTTLE_GPU_IDLE,
+    THROTTLE_HW_THERMAL,
+    THROTTLE_SW_POWER_CAP,
+    THROTTLE_SW_THERMAL,
     CudaMapping,
     Gpu,
     devices_in_use,
@@ -91,6 +96,107 @@ def test_label_never_invents_a_cuda_index() -> None:
 
     unmapped.cuda_index = 1
     assert "CUDA1" in unmapped.label
+
+
+# ----------------------------------------------------------------- thermals
+#
+# Graded against the card's OWN slowdown threshold, never a fixed temperature.
+# The two cards on the development box slow down at 95 C and 96 C, with GPU_MAX
+# at 93 and 90 -- any single hardcoded limit is wrong on at least one of them,
+# and would be wrong in a different way on a laptop or a datacentre card.
+
+
+def test_an_idle_card_is_not_reported_as_throttling() -> None:
+    """NVML sets GPU_IDLE on a card doing nothing.
+
+    A naive "throttle reasons != 0" check lights the panel up on a machine that
+    is perfectly healthy and merely idle -- which teaches the user to ignore the
+    warning, making it worse than no warning at all.
+    """
+    idle = make_gpu(temperature_c=31, temp_slowdown_c=95, throttle_reasons=THROTTLE_GPU_IDLE)
+
+    assert idle.throttle_labels == ()
+    assert idle.throttling_thermally is False
+    assert idle.thermal_state == "ok"
+
+
+def test_user_set_clocks_are_not_a_fault_either() -> None:
+    card = make_gpu(temperature_c=40, temp_slowdown_c=95, throttle_reasons=THROTTLE_APP_CLOCKS)
+    assert card.throttle_labels == ()
+
+
+@pytest.mark.parametrize(
+    ("temp", "slowdown", "expected"),
+    [
+        (31, 95, "ok"),
+        (79, 95, "ok"),
+        (80, 95, "warm"),  # within 15 of slowdown
+        (89, 95, "warm"),
+        (90, 95, "hot"),  # within 5 of slowdown
+        (95, 95, "hot"),
+        # The same temperature on a card with a lower limit is further along.
+        (85, 90, "hot"),
+        (85, 105, "ok"),
+    ],
+)
+def test_thermal_state_is_relative_to_the_cards_own_limit(temp, slowdown, expected) -> None:
+    card = make_gpu(temperature_c=temp, temp_slowdown_c=slowdown)
+    assert card.thermal_state == expected
+
+
+def test_throttling_outranks_the_temperature() -> None:
+    """A card already clamping itself is past the point where the reading leads.
+
+    Reported temperature can even fall while throttling -- that is the throttle
+    working -- so grading on temperature alone would show a cooling card as
+    healthy at the exact moment its throughput collapsed.
+    """
+    cool_but_clamped = make_gpu(
+        temperature_c=62, temp_slowdown_c=95, throttle_reasons=THROTTLE_HW_THERMAL
+    )
+
+    assert cool_but_clamped.thermal_state == "throttling"
+    assert cool_but_clamped.throttling_thermally is True
+    assert "hardware thermal slowdown" in cool_but_clamped.throttle_labels
+
+
+def test_power_capping_is_reported_but_is_not_thermal() -> None:
+    """Normal on a stock card under sustained load. It explains a low throughput
+    figure without being a fault to fix."""
+    card = make_gpu(temperature_c=70, temp_slowdown_c=95, throttle_reasons=THROTTLE_SW_POWER_CAP)
+
+    assert card.throttling_for_power is True
+    assert card.throttling_thermally is False
+    assert card.thermal_state == "ok"
+    assert card.throttle_labels == ("power cap",)
+
+
+def test_thermal_headroom_is_degrees_not_a_grade() -> None:
+    card = make_gpu(temperature_c=71, temp_slowdown_c=96)
+    assert card.thermal_headroom_c == 25
+
+
+def test_a_card_that_reports_no_threshold_still_grades() -> None:
+    """Some virtualised and WSL setups omit the thresholds. Falling back to a
+    conservative constant beats showing nothing on the one panel that exists to
+    warn people."""
+    card = make_gpu(temperature_c=88, temp_slowdown_c=None)
+    assert card.thermal_state == "hot"
+
+
+def test_no_temperature_at_all_is_unknown_rather_than_ok() -> None:
+    """Absence of a reading is not evidence of a cool card."""
+    card = make_gpu(temperature_c=None, temp_slowdown_c=None)
+    assert card.thermal_state == "unknown"
+
+
+def test_several_throttle_reasons_are_all_named() -> None:
+    card = make_gpu(
+        temperature_c=94,
+        temp_slowdown_c=95,
+        throttle_reasons=THROTTLE_SW_THERMAL | THROTTLE_SW_POWER_CAP | THROTTLE_GPU_IDLE,
+    )
+    assert card.throttle_labels == ("software thermal slowdown", "power cap")
 
 
 # ------------------------------------------------------- vision residency

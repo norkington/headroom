@@ -727,6 +727,40 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
   color: var(--ink-3);
 }
 
+/*
+ * Thermals. The temperature itself is coloured rather than badged: it is a
+ * reading that is usually fine, and a permanent pill next to a 40 C card would
+ * spend attention the panel needs for VRAM.
+ */
+.thermal-ok { color: inherit; }
+.thermal-warm { color: var(--tight); }
+.thermal-hot { color: var(--critical); font-weight: 600; }
+.thermal-throttling { color: var(--critical); font-weight: 700; }
+.thermal-unknown { color: var(--ink-3); }
+
+.gpu-thermal {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 3px;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+.gpu-thermal.throttling { background: var(--critical-bg); color: var(--critical); }
+.gpu-thermal.hot { background: var(--tight-bg); color: var(--tight); }
+.gpu-thermal.power { background: var(--surface-2); color: var(--ink-3); }
+
+.ctx-input {
+  width: 8ch;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  padding: 5px 7px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.ctx-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 .bench-history { margin-top: 14px; border-top: 1px solid var(--rule); }
 .bench-history > summary {
   cursor: pointer;

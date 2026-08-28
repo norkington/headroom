@@ -254,6 +254,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 | {
                     "headroom_state": g.headroom_state,
                     "headroom_provisional": g.headroom_provisional,
+                    "thermal_state": g.thermal_state,
+                    "thermal_headroom_c": g.thermal_headroom_c,
+                    "throttle_labels": list(g.throttle_labels),
+                    "throttling_thermally": g.throttling_thermally,
+                    "throttling_for_power": g.throttling_for_power,
                     "label": g.label,
                 }
                 for g in cards
@@ -309,6 +314,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "utilization_pct": g.utilization_pct,
                             "power_watts": g.power_watts,
                             "temperature_c": g.temperature_c,
+                            # Thermals travel with the memory figures because
+                            # they explain them: a card that is clamping itself
+                            # is not delivering the throughput its VRAM implies.
+                            "thermal_state": g.thermal_state,
+                            "thermal_headroom_c": g.thermal_headroom_c,
+                            "temp_slowdown_c": g.temp_slowdown_c,
+                            "fan_percent": g.fan_percent,
+                            "throttle_labels": list(g.throttle_labels),
+                            "throttling_thermally": g.throttling_thermally,
+                            "throttling_for_power": g.throttling_for_power,
                         }
                         for g in cards
                     ],
@@ -388,7 +403,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return asdict(state) | {"status": state.status}
 
     @app.post("/api/server/start")
-    async def server_start(model: str | None = None, vision: bool = False) -> dict[str, Any]:
+    async def server_start(
+        model: str | None = None, vision: bool = False, ctx: int | None = None
+    ) -> dict[str, Any]:
         existing = await server_mod.probe(settings.port)
         if existing.status in {"running", "loading"}:
             raise HTTPException(
@@ -413,7 +430,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reg = registry_mod.load(settings.registry_path)
             entry = reg.get(model)
             argv = registry_mod.build_argv(
-                entry, settings.llama_server, port=settings.port, vision=vision
+                entry,
+                settings.llama_server,
+                port=settings.port,
+                vision=vision,
+                # An explicit context beats both the serve block and the vision
+                # profile, which is what makes it useful for finding a ceiling:
+                # the registry value is the one being questioned. build_argv
+                # already gives an override precedence over vision.ctx.
+                overrides={"ctx": ctx} if ctx else None,
             )
         except registry_mod.RegistryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -429,6 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "pid": pid,
             "model": entry.key,
             "vision": vision,
+            "ctx_override": ctx,
             "log": str(log_path),
             "argv": argv,
             # The caller polls /api/server or the telemetry stream from here.

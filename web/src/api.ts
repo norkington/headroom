@@ -9,6 +9,7 @@
  */
 
 export type HeadroomState = "ok" | "tight" | "critical";
+export type ThermalState = "ok" | "warm" | "hot" | "throttling" | "unknown";
 export type ServerStatus = "running" | "loading" | "stopped" | "orphaned";
 
 export interface Gpu {
@@ -29,6 +30,17 @@ export interface Gpu {
    * way down and must not be read as spare capacity.
    */
   headroom_provisional: boolean;
+  /** `ok` | `warm` | `hot` | `throttling` | `unknown`, graded against this
+   *  card's own slowdown threshold rather than a fixed temperature. */
+  thermal_state: ThermalState;
+  /** Degrees left before the card starts slowing itself down. */
+  thermal_headroom_c: number | null;
+  temp_slowdown_c: number | null;
+  fan_percent: number | null;
+  /** Active throttle reasons worth naming; benign ones (idle) excluded. */
+  throttle_labels: string[];
+  throttling_thermally: boolean;
+  throttling_for_power: boolean;
   utilization_pct: number | null;
   power_watts: number | null;
   temperature_c: number | null;

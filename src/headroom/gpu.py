@@ -44,6 +44,52 @@ HEADROOM_TIGHT_MIB = 1200
 # llama-server, and a command line carrying neither means every visible device.
 _DEVICE_FLAGS = ("-dev", "--device")
 
+# NVML's clock-throttle bitmask. Defined here rather than imported because the
+# library renamed them (`ClocksThrottleReason*` -> `ClocksEventReason*`) and a
+# missing attribute on someone else's pynvml would take out the whole poll for a
+# decorative field. The bit values are part of the driver ABI and stable.
+THROTTLE_GPU_IDLE = 0x1
+THROTTLE_APP_CLOCKS = 0x2
+THROTTLE_SW_POWER_CAP = 0x4
+THROTTLE_HW_SLOWDOWN = 0x8
+THROTTLE_SYNC_BOOST = 0x10
+THROTTLE_SW_THERMAL = 0x20
+THROTTLE_HW_THERMAL = 0x40
+THROTTLE_HW_POWER_BRAKE = 0x80
+THROTTLE_DISPLAY_CLOCKS = 0x100
+
+#: The card is slowing itself down because of heat. This is the one that
+#: invalidates a benchmark: the number measured is the cooling, not the model.
+THERMAL_THROTTLE_BITS = THROTTLE_SW_THERMAL | THROTTLE_HW_THERMAL
+
+#: Clamped by the power budget rather than by heat. Common and often expected on
+#: a stock card under sustained load, so it is reported and not alarmed about.
+POWER_THROTTLE_BITS = THROTTLE_SW_POWER_CAP | THROTTLE_HW_POWER_BRAKE
+
+# Not faults. GPU_IDLE is set on an idle card and means nothing is wrong, which
+# is why a naive "throttle reasons != 0" check lights up on a machine doing
+# nothing at all.
+_BENIGN_BITS = THROTTLE_GPU_IDLE | THROTTLE_APP_CLOCKS | THROTTLE_DISPLAY_CLOCKS
+
+_THROTTLE_LABELS: tuple[tuple[int, str], ...] = (
+    (THROTTLE_HW_THERMAL, "hardware thermal slowdown"),
+    (THROTTLE_SW_THERMAL, "software thermal slowdown"),
+    (THROTTLE_HW_POWER_BRAKE, "power brake"),
+    (THROTTLE_SW_POWER_CAP, "power cap"),
+    (THROTTLE_HW_SLOWDOWN, "hardware slowdown"),
+    (THROTTLE_SYNC_BOOST, "sync boost"),
+)
+
+# Thermal grading is done against the card's OWN slowdown threshold, never an
+# absolute temperature. 83 C is comfortable on one card and throttling on
+# another, and hardcoding a number is how a tool works only on its author's
+# hardware -- the same failure `headroom.config` exists to avoid.
+THERMAL_HOT_MARGIN_C = 5
+THERMAL_WARM_MARGIN_C = 15
+
+# Only for cards that will not report a threshold. Deliberately conservative.
+FALLBACK_SLOWDOWN_C = 90
+
 
 @dataclass(slots=True)
 class Gpu:
@@ -59,6 +105,17 @@ class Gpu:
     temperature_c: int | None = None
     pcie_bus_id: str = ""
     pcie_link_width: int | None = None
+
+    # Thermals. The thresholds are the card's own, read from the driver, so
+    # grading works on hardware this was never tested on.
+    temp_slowdown_c: int | None = None
+    temp_shutdown_c: int | None = None
+    fan_percent: int | None = None
+    clock_sm_mhz: int | None = None
+    clock_sm_max_mhz: int | None = None
+    #: Raw NVML bitmask. Zero also means "not reported", which is why the
+    #: properties below never treat 0 as evidence of health.
+    throttle_reasons: int = 0
 
     # Filled in by resolve_cuda_mapping(); None until then, and None is honest
     # rather than a guess -- callers must not invent a mapping.
@@ -103,6 +160,56 @@ class Gpu:
         that already says everything.
         """
         return self.vision_resident and self.headroom_state != "critical"
+
+    @property
+    def throttling_thermally(self) -> bool:
+        """The card is slowing itself down because of heat, right now."""
+        return bool(self.throttle_reasons & THERMAL_THROTTLE_BITS)
+
+    @property
+    def throttling_for_power(self) -> bool:
+        """Clamped by its power budget. Normal under sustained load."""
+        return bool(self.throttle_reasons & POWER_THROTTLE_BITS)
+
+    @property
+    def throttle_labels(self) -> tuple[str, ...]:
+        """Active throttle reasons worth naming, benign ones excluded.
+
+        `GpuIdle` is set on a card doing nothing, so a bare "reasons != 0" check
+        reports a problem on an idle machine.
+        """
+        active = self.throttle_reasons & ~_BENIGN_BITS
+        return tuple(label for bit, label in _THROTTLE_LABELS if active & bit)
+
+    @property
+    def thermal_headroom_c(self) -> int | None:
+        """Degrees left before the card starts slowing itself down."""
+        if self.temperature_c is None:
+            return None
+        return (self.temp_slowdown_c or FALLBACK_SLOWDOWN_C) - self.temperature_c
+
+    @property
+    def thermal_state(self) -> str:
+        """`ok` | `warm` | `hot` | `throttling` | `unknown`.
+
+        Graded against this card's own slowdown threshold rather than a fixed
+        temperature, because the thresholds genuinely differ -- 95 C on one card
+        here and 96 C on the other, with GPU_MAX at 93 and 90. A single hardcoded
+        limit would be wrong on both.
+
+        `throttling` outranks temperature: a card that has already been clamped
+        is past the point where the reading is the interesting fact.
+        """
+        if self.throttling_thermally:
+            return "throttling"
+        if self.temperature_c is None:
+            return "unknown"
+        slowdown = self.temp_slowdown_c or FALLBACK_SLOWDOWN_C
+        if self.temperature_c >= slowdown - THERMAL_HOT_MARGIN_C:
+            return "hot"
+        if self.temperature_c >= slowdown - THERMAL_WARM_MARGIN_C:
+            return "warm"
+        return "ok"
 
     @property
     def label(self) -> str:
@@ -184,6 +291,9 @@ class NvmlBackend:
         self._nvml = None
         self._handles: list = []
         self._init_failed_reason: str | None = None
+        # Temperature thresholds are properties of the card, not of the moment.
+        # Read once and reused, the same reasoning as the CUDA mapping cache.
+        self._thresholds: dict[int, tuple[int | None, int | None]] = {}
 
     def available(self) -> bool:
         return self._ensure_init()
@@ -223,6 +333,37 @@ class NvmlBackend:
             power = _try(lambda h=handle: n.nvmlDeviceGetPowerUsage(h) / 1000.0)
             temp = _try(lambda h=handle: n.nvmlDeviceGetTemperature(h, n.NVML_TEMPERATURE_GPU))
             width = _try(lambda h=handle: n.nvmlDeviceGetCurrPcieLinkWidth(h))
+            fan = _try(lambda h=handle: n.nvmlDeviceGetFanSpeed(h))
+            clock = _try(lambda h=handle: n.nvmlDeviceGetClockInfo(h, n.NVML_CLOCK_SM))
+            clock_max = _try(lambda h=handle: n.nvmlDeviceGetMaxClockInfo(h, n.NVML_CLOCK_SM))
+
+            # Renamed across pynvml versions; try both rather than pin a version
+            # for one field. Absent on some virtualised and WSL setups, where 0
+            # simply means "not reported" -- see Gpu.throttle_labels.
+            throttle = 0
+            for fn_name in (
+                "nvmlDeviceGetCurrentClocksEventReasons",
+                "nvmlDeviceGetCurrentClocksThrottleReasons",
+            ):
+                fn = getattr(n, fn_name, None)
+                if fn is not None:
+                    throttle = _try(lambda f=fn, h=handle: f(h)) or 0
+                    break
+
+            if idx not in self._thresholds:
+                self._thresholds[idx] = (
+                    _try(
+                        lambda h=handle: n.nvmlDeviceGetTemperatureThreshold(
+                            h, n.NVML_TEMPERATURE_THRESHOLD_SLOWDOWN
+                        )
+                    ),
+                    _try(
+                        lambda h=handle: n.nvmlDeviceGetTemperatureThreshold(
+                            h, n.NVML_TEMPERATURE_THRESHOLD_SHUTDOWN
+                        )
+                    ),
+                )
+            slowdown_c, shutdown_c = self._thresholds[idx]
 
             name = n.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
@@ -244,6 +385,12 @@ class NvmlBackend:
                     temperature_c=temp,
                     pcie_bus_id=bus_id,
                     pcie_link_width=width,
+                    temp_slowdown_c=slowdown_c,
+                    temp_shutdown_c=shutdown_c,
+                    fan_percent=fan,
+                    clock_sm_mhz=clock,
+                    clock_sm_max_mhz=clock_max,
+                    throttle_reasons=throttle,
                 )
             )
         return out

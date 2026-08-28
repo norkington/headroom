@@ -86,10 +86,46 @@ export function GpuCard({ gpu }: { gpu: Gpu }) {
         </div>
         <div>
           <span className="k">temp</span>
-          {gpu.temperature_c ?? "—"}
-          {gpu.temperature_c !== null && "°"}
+          <span className={`thermal-${gpu.thermal_state}`}>
+            {gpu.temperature_c ?? "—"}
+            {gpu.temperature_c !== null && "°"}
+          </span>
+          {/* The margin, not just the reading. 71 C means nothing without
+              knowing this card slows itself down at 96. */}
+          {gpu.thermal_headroom_c !== null && gpu.temp_slowdown_c !== null && (
+            <span className="fig-sub">{gpu.thermal_headroom_c}° to slowdown</span>
+          )}
         </div>
       </div>
+
+      {/* Throttling outranks the temperature: a card that has already been
+          clamped is past the point where the reading is the interesting fact,
+          and any throughput measured while it lasts describes the cooling. */}
+      {gpu.throttling_thermally && (
+        <div className="gpu-thermal throttling">
+          <strong>Thermally throttling.</strong> This card is slowing itself down to shed heat, so
+          it is not delivering the throughput its free VRAM implies. Benchmarks taken now measure
+          the cooling as much as the model.
+          {gpu.throttle_labels.length > 0 && ` (${gpu.throttle_labels.join(", ")})`}
+        </div>
+      )}
+
+      {!gpu.throttling_thermally && gpu.thermal_state === "hot" && (
+        <div className="gpu-thermal hot">
+          <strong>{gpu.thermal_headroom_c}° from slowdown.</strong> Close enough that a sustained
+          load will likely start clamping. Worth checking airflow before trusting a long benchmark.
+        </div>
+      )}
+
+      {/* Power capping is normal on a stock card under sustained load, so it is
+          reported without alarm -- but it does explain a throughput figure that
+          looks low for the hardware. */}
+      {!gpu.throttling_thermally && gpu.throttling_for_power && (
+        <div className="gpu-thermal power">
+          Power-capped at its board limit. Normal under sustained load, and it caps clocks — worth
+          knowing if throughput reads lower than expected.
+        </div>
+      )}
 
       {gpu.headroom_provisional && (
         <div className="gpu-provisional">

@@ -94,6 +94,7 @@ OWNED_MEASURED_KEYS = frozenset(
         "prefill_note",
         "mtp_acceptance_range",
         "vram_free_breakdown",
+        "thermal_note",
         "carried_forward",
     }
 )
@@ -494,6 +495,8 @@ class BenchmarkRunner:
                 task_acceptance: dict[str, float] = {}
 
                 per_task_decodes: dict[str, list[float]] = {}
+                thermals: dict = {}
+                self._sample_thermals(thermals)
 
                 for name, prompt in TASKS:
                     b.phase = f"task: {name}"
@@ -516,6 +519,7 @@ class BenchmarkRunner:
                         "acceptance": _round(task_mean_acceptance, 3),
                         "runs": len(decodes),
                     }
+                    self._sample_thermals(thermals)
 
                 prefill_values: list[float] = []
                 prefill_cached = 0
@@ -532,6 +536,7 @@ class BenchmarkRunner:
             # script, because it already has per-card telemetry rather than one
             # nvidia-smi line.
             b.phase = "reading VRAM"
+            self._sample_thermals(thermals)
             vram_total, vram_breakdown = self._read_free_vram()
 
             b.result = self._summarise(
@@ -546,6 +551,7 @@ class BenchmarkRunner:
                 prefill_cached=prefill_cached,
                 vram_total=vram_total,
                 vram_breakdown=vram_breakdown,
+                thermals=thermals,
             )
             b.phase = "done"
             b.status = BenchStatus.COMPLETE
@@ -579,6 +585,33 @@ class BenchmarkRunner:
             b.finished_at = time.time()
             self._persist()
             log.exception("benchmark %s failed", b.id)
+
+    def _sample_thermals(self, seen: dict) -> None:
+        """Record the worst thermal state observed so far in this run.
+
+        Sampled at task boundaries rather than continuously: the point is not a
+        trace, it is whether the cards were ever clamped while the numbers were
+        being taken. A run that thermally throttled measured the cooling, not
+        the model, and a decode figure from it is not comparable with one from a
+        cold start -- which is exactly the kind of difference someone would
+        otherwise read as a regression.
+        """
+        if self._read_gpus is None:
+            return
+        try:
+            cards = self._read_gpus()
+        except Exception:  # noqa: BLE001 - telemetry must never fail a run
+            return
+        for card in cards:
+            temp = getattr(card, "temperature_c", None)
+            if temp is not None and temp > seen.get("peak_temp_c", -1):
+                seen["peak_temp_c"] = temp
+            if getattr(card, "throttling_thermally", False):
+                seen["thermal"] = True
+            if getattr(card, "throttling_for_power", False):
+                seen["power"] = True
+            for label in getattr(card, "throttle_labels", ()):
+                seen.setdefault("labels", set()).add(f"{card.name}: {label}")
 
     async def _read_n_ctx(self, client: httpx.AsyncClient, port: int) -> int | None:
         try:
@@ -709,6 +742,7 @@ class BenchmarkRunner:
         prefill_cached: int,
         vram_total: int | None,
         vram_breakdown: str | None,
+        thermals: dict | None = None,
     ) -> dict[str, Any]:
         """Build the ``measured`` block, notes and caveats included.
 
@@ -796,8 +830,35 @@ class BenchmarkRunner:
             if vram_breakdown:
                 measured["vram_free_breakdown"] = vram_breakdown
 
+        # Always recorded, never only on failure. An absent key is ambiguous --
+        # it could mean a clean run or an older run that never looked -- and the
+        # whole point of this block is that a reader months later can tell.
+        seen = thermals or {}
+        peak = seen.get("peak_temp_c")
+        throttled = bool(seen.get("thermal"))
+        if throttled:
+            measured["thermal_note"] = (
+                "THERMALLY THROTTLED DURING THIS RUN"
+                + (f", peaking at {peak} C" if peak is not None else "")
+                + ". The cards clamped themselves while these figures were being taken, so "
+                "decode measures the cooling as much as the model. Not comparable with a run "
+                "from a cold start. Observed: " + "; ".join(sorted(seen.get("labels", set())))
+            )
+        elif peak is not None:
+            measured["thermal_note"] = (
+                f"No thermal throttling observed; cards peaked at {peak} C during the run."
+                + (
+                    " Power-capped at times, which is normal under sustained load."
+                    if seen.get("power")
+                    else ""
+                )
+            )
+
         return {
             "measured": measured,
+            "peak_temp_c": peak,
+            "throttled_during_run": throttled,
+            "thermal_note": measured.get("thermal_note"),
             "n_ctx": b.n_ctx,
             "context_label": context_label(b.n_ctx),
             "vram_free_mib": vram_total,

@@ -35,9 +35,21 @@ export function ServerPanel({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string>("");
   const [vision, setVision] = useState(false);
+  // Blank means "use the registry", which is the normal case. Only a deliberate
+  // value overrides, so an experiment cannot silently become the default.
+  const [ctx, setCtx] = useState<string>("");
 
   const startable = models.filter((m) => m.installed);
   const chosen = models.find((m) => m.key === selected) ?? null;
+  // What would be used if the box is left blank -- the vision profile's own
+  // context when vision is ticked, otherwise the serve block's.
+  const registryCtx = chosen
+    ? Number(
+        (vision && chosen.vision_supported && (chosen.serve["vision_ctx"] as number)) ||
+          chosen.serve["ctx"] ||
+          0,
+      ) || null
+    : null;
 
   // Seed the selection once the registry has loaded: whatever is running, else
   // the registry default, else the first installed entry. Re-seeding on every
@@ -64,9 +76,11 @@ export function ServerPanel({
     setBusy(which);
     setError(null);
     try {
+      const trimmed = ctx.trim();
       const query =
         which === "start" && selected
-          ? `?model=${encodeURIComponent(selected)}&vision=${vision ? "true" : "false"}`
+          ? `?model=${encodeURIComponent(selected)}&vision=${vision ? "true" : "false"}` +
+            (trimmed ? `&ctx=${encodeURIComponent(trimmed)}` : "")
           : "";
       await postJSON(`/api/server/${which}${query}`);
       onChanged();
@@ -159,6 +173,23 @@ export function ServerPanel({
             vision
           </label>
 
+          <label
+            className="picker-field"
+            title="Override the context length for this start only. Blank uses the registry."
+          >
+            <span className="k">ctx</span>
+            <input
+              type="number"
+              className="ctx-input"
+              min={512}
+              step={1024}
+              placeholder={registryCtx ? String(registryCtx) : "registry"}
+              value={ctx}
+              disabled={busy !== null}
+              onChange={(e) => setCtx(e.target.value)}
+            />
+          </label>
+
           {chosen && (
             <span className="picker-meta">
               {chosen.size_gib.toFixed(2)} GiB · {chosen.arch}
@@ -203,6 +234,21 @@ export function ServerPanel({
             allocate. If it does, shorten the context and record what worked in the
             registry&rsquo;s <code>vision</code> block — that is the measurement Headroom will
             not guess at.
+          </div>
+        </div>
+      )}
+
+      {/* An override is a one-off experiment, not a decision. Saying so at the
+          moment of starting is what keeps someone from later reading a
+          measurement taken at 96k as though the registry said 96k. */}
+      {stopped && ctx.trim() && (
+        <div className="finding info">
+          <div className="finding-detail">
+            Starting at <strong>{Number(ctx.trim()).toLocaleString()}</strong> context instead of
+            the registry&rsquo;s{registryCtx ? ` ${registryCtx.toLocaleString()}` : ""}. This
+            applies to this start only and is <em>not</em> written to models.json — if it turns
+            out to be the right value, put it there deliberately. A context the cards cannot fit
+            fails at load, which is the cheap way to find the ceiling.
           </div>
         </div>
       )}
