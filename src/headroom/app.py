@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -27,6 +28,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import bench as bench_mod
+from . import ceiling as ceiling_mod
 from . import config as config_mod
 from . import downloads as downloads_mod
 from . import gguf as gguf_mod
@@ -115,6 +117,7 @@ class State:
         self.bench = bench_mod.BenchmarkRunner(
             read_gpus=self.gpus, store=JsonStore(settings.state_dir / "benchmarks.json")
         )
+        self.ceiling = ceiling_mod.CeilingRunner()
         self.cuda_mapping = gpu_mod.CudaMapping()
         self.mapping_resolved = False
         self._key_for_path: tuple[str, str] | None = None
@@ -667,6 +670,148 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Nothing is written on cancel: a partial run is not a measurement, and
         # recording one would be worse than having no number at all.
         return {"cancelled": True, "note": "no partial result was recorded"}
+
+    # ---------------------------------------------------------------- ceiling
+    @app.get("/api/ceiling")
+    async def ceiling_list() -> dict[str, Any]:
+        hr: State = app.state.hr
+        return {"searches": [s.to_dict() for s in hr.ceiling.list()]}
+
+    @app.post("/api/ceiling/start")
+    async def ceiling_start(
+        model: str | None = None,
+        margin_mib: int = gpu_mod.HEADROOM_TIGHT_MIB,
+        max_ctx: int = 262144,
+        start_ctx: int | None = None,
+    ) -> dict[str, Any]:
+        """Find the largest context that still leaves every card above `margin_mib`.
+
+        The default margin is the same threshold the GPU panel grades against,
+        so the answer agrees with the colour the rest of the app is showing. A
+        context that merely *loads* is not the target: fitting with 200 MiB to
+        spare is one browser tab from an OOM mid-generation.
+
+        This starts and stops the server repeatedly, so it refuses to begin
+        while one is already up -- the model that is loaded is somebody's
+        working state, and unloading it silently would cost them minutes.
+        """
+        hr: State = app.state.hr
+        if settings.llama_server is None:
+            raise HTTPException(
+                status_code=503, detail="llama-server was not found, so nothing can be probed."
+            )
+
+        existing = await server_mod.probe(settings.port)
+        if existing.status in {"running", "loading"}:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"a server is already {existing.status} on port {settings.port}. This search "
+                    "starts and stops the server several times, so stop yours first -- it will "
+                    "not unload a model you are using."
+                ),
+            )
+
+        try:
+            reg = registry_mod.load(settings.registry_path)
+            entry = reg.get(model)
+        except registry_mod.RegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # The recorded cost per token seeds the search's first step. Only a
+        # seed: two real probes replace it with a measured slope, because the
+        # recorded figure covers the KV cache while what binds is everything
+        # that scales with context.
+        recorded = entry.measured.get("kv_bytes_per_token")
+        hint = None
+        try:
+            if recorded:
+                hint = float(recorded) / 1024 / 1024
+        except (TypeError, ValueError):
+            hint = None
+
+        first = start_ctx or int(entry.serve.get("ctx") or 8192)
+        log_path = settings.log_dir / f"llama-server-{entry.key}.log"
+
+        async def probe_ctx(ctx: int, margin: int) -> ceiling_mod.Probe:
+            """Try one context for real: start, wait, measure, stop."""
+            began = time.time()
+            argv = registry_mod.build_argv(
+                entry, settings.llama_server, port=settings.port, overrides={"ctx": ctx}
+            )
+            try:
+                server_mod.spawn_detached(argv, log_path)
+            except server_mod.SpawnError as exc:
+                return ceiling_mod.Probe(
+                    ctx=ctx, loaded=False, error=str(exc), seconds=time.time() - began
+                )
+
+            state = await server_mod.wait_until_ready(settings.port, timeout=300.0)
+            if not state.reachable:
+                # A context that does not fit exits during startup. That is data,
+                # not an error -- it is the upper bracket the search needs.
+                await server_mod.stop(settings.port, force=True)
+                return ceiling_mod.Probe(
+                    ctx=ctx,
+                    loaded=False,
+                    error=state.error or "did not become ready",
+                    seconds=time.time() - began,
+                )
+
+            cards = hr.gpus()
+            free = [c.memory_free_mib for c in cards] if cards else []
+            tightest = min(free) if free else None
+            breakdown = (
+                " + ".join(
+                    f"{c.memory_free_mib} MiB on {c.label}"
+                    for c in sorted(cards, key=lambda c: (c.cuda_index is None, c.cuda_index))
+                )
+                if cards
+                else None
+            )
+            await server_mod.stop(settings.port)
+            return ceiling_mod.Probe(
+                ctx=ctx,
+                loaded=True,
+                free_mib=tightest,
+                breakdown=breakdown,
+                within_margin=tightest is not None and tightest >= margin,
+                seconds=time.time() - began,
+            )
+
+        try:
+            search = hr.ceiling.start(
+                model_key=entry.key,
+                port=settings.port,
+                start_ctx=first,
+                margin_mib=margin_mib,
+                max_ctx=max_ctx,
+                probe_fn=probe_ctx,
+                hint_mib_per_token=hint,
+            )
+        except ceiling_mod.CeilingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        return search.to_dict() | {
+            "seeded_from_registry": hint is not None,
+            "note": (
+                "running; poll /api/ceiling. Each probe is a real model load, so this takes "
+                "minutes. Nothing is written to models.json."
+            ),
+        }
+
+    @app.delete("/api/ceiling/{search_id}")
+    async def ceiling_cancel(search_id: str) -> dict[str, Any]:
+        hr: State = app.state.hr
+        if not hr.ceiling.cancel(search_id):
+            raise HTTPException(status_code=404, detail="no such running search")
+        return {
+            "cancelled": True,
+            "note": (
+                "the probe in flight may leave a server running -- check the server panel "
+                "and stop it if so."
+            ),
+        }
 
     # ---------------------------------------------------------------- registry write
     @app.post("/api/registry/add")

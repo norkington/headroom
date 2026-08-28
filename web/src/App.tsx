@@ -7,6 +7,7 @@ import { ServerPanel } from "./components/ServerPanel";
 import { ModelList } from "./components/ModelList";
 import { ProbePanel } from "./components/ProbePanel";
 import { BenchPanel } from "./components/BenchPanel";
+import { CeilingPanel } from "./components/CeilingPanel";
 import { Downloads } from "./components/Downloads";
 
 interface GpuResponse {
@@ -131,6 +132,19 @@ export function App() {
         <h2>Benchmark</h2>
         {server ? (
           <BenchPanel server={server} onRecorded={refresh} />
+        ) : (
+          <div className="empty">Waiting for server state…</div>
+        )}
+      </section>
+
+      {/* Sits below the benchmark because it answers a different question about
+          the same model: not "how fast is this configuration" but "is this
+          configuration the right size". It needs the server STOPPED, which is
+          the opposite of the benchmark above it, so the two never compete. */}
+      <section>
+        <h2>Context ceiling</h2>
+        {server ? (
+          <CeilingPanel server={server} />
         ) : (
           <div className="empty">Waiting for server state…</div>
         )}
