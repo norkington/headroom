@@ -41,15 +41,26 @@ export function ServerPanel({
 
   const startable = models.filter((m) => m.installed);
   const chosen = models.find((m) => m.key === selected) ?? null;
-  // What would be used if the box is left blank -- the vision profile's own
-  // context when vision is ticked, otherwise the serve block's.
+  // What would be used if the box is left blank. This mirrors `build_argv`'s
+  // precedence deliberately -- vision.ctx, else serve.ctx -- because the number
+  // shown beside the Start button and the number that reaches --ctx-size have
+  // to be the same one. It read `serve.vision_ctx` until 2026-08-28: a key the
+  // registry has never had, so a vision start silently displayed the text
+  // context instead of the profile's.
   const registryCtx = chosen
     ? Number(
-        (vision && chosen.vision_supported && (chosen.serve["vision_ctx"] as number)) ||
+        (vision && chosen.vision_supported && (chosen.vision?.["ctx"] as number)) ||
           chosen.serve["ctx"] ||
           0,
       ) || null
     : null;
+  // What a Start would actually load right now: the override if one is typed,
+  // otherwise whatever the registry resolved to above. Worth stating outright,
+  // because it was the one number the panel left the user to infer -- from a
+  // placeholder, in a field too narrow to show it, and not shown at all once
+  // vision was ticked and the profile's own context took over.
+  const typedCtx = Number(ctx.trim()) || null;
+  const effectiveCtx = ctx.trim() ? typedCtx : registryCtx;
 
   // Seed the selection once the registry has loaded: whatever is running, else
   // the registry default, else the first installed entry. Re-seeding on every
@@ -174,7 +185,7 @@ export function ServerPanel({
           </label>
 
           <label
-            className="picker-field"
+            className="picker-field compact"
             title="Override the context length for this start only. Blank uses the registry."
           >
             <span className="k">ctx</span>
@@ -193,10 +204,14 @@ export function ServerPanel({
           {chosen && (
             <span className="picker-meta">
               {chosen.size_gib.toFixed(2)} GiB · {chosen.arch}
-              {chosen.serve["ctx"] != null && !vision
-                ? ` · ${Number(chosen.serve["ctx"]).toLocaleString()} ctx`
-                : ""}
               {vision && chosen.vision_supported ? " · vision profile" : ""}
+              {effectiveCtx !== null && (
+                <>
+                  {" · "}
+                  <strong className="picker-ctx">{effectiveCtx.toLocaleString()}</strong> ctx
+                  {ctx.trim() ? " (override)" : ""}
+                </>
+              )}
             </span>
           )}
         </div>

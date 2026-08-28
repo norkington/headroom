@@ -28,6 +28,15 @@
   --accent: #4fa8c7;
   --accent-dim: #17323d;
 
+  /* The wordmark's own ramp. Built from the accent's hue and nothing else, so
+     the one piece of pure decoration in the app cannot be mistaken for a
+     reading: green and amber stay reserved for cards that are actually fine or
+     actually tight. */
+  --mark-1: #2f7d99;
+  --mark-2: #7fd4ee;
+  --mark-3: #eaf6fb;
+  --mark-glow: rgba(79, 168, 199, 0.3);
+
   --ok: #52b98c;
   --ok-bg: #14261f;
   --tight: #e3a445;
@@ -53,6 +62,16 @@
 
     --accent: #1d6f8c;
     --accent-dim: #dceaf1;
+
+    /* Same ramp inverted in weight, not just in value: on a near-white ground
+       the sheen has to be the dark end of the hue or the letters wash out. */
+    --mark-1: #0f4a5e;
+    /* The sheen's brightest stop, and on a near-white ground it is also the
+       lowest-contrast one -- so it is set by measurement, not by eye. #2f9cbe
+       looked right and came out at 2.9:1, under AA's 3:1 for large text. */
+    --mark-2: #26839f;
+    --mark-3: #08333f;
+    --mark-glow: rgba(29, 111, 140, 0.16);
 
     --ok: #1f6a4a;
     --ok-bg: #ddeee5;
@@ -85,27 +104,100 @@ body {
 
 /* ---------------------------------------------------------------- header */
 .masthead {
+  position: relative;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 20px;
   flex-wrap: wrap;
   padding-bottom: 18px;
-  border-bottom: 1px solid var(--rule);
   margin-bottom: 26px;
 }
 
+/* The rule under the masthead, carrying the accent under the wordmark and
+   fading out across the page. A flat 1px line read as the top of the first
+   section rather than the bottom of the header. */
+.masthead::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--rule-2) 32%,
+    var(--rule) 100%
+  );
+}
+
+/*
+ * The wordmark.
+ *
+ * Everything else in this stylesheet earns its colour by meaning something.
+ * This is the one element allowed to be purely decorative, so it is fenced off:
+ * it draws from --mark-*, an accent-hue ramp that appears nowhere else, and the
+ * sheen sweeps rather than blinks so a panel left open on a second screen does
+ * not flicker in the corner of someone's eye.
+ *
+ * The gradient fill is applied inside @supports with a solid colour outside it.
+ * `background-clip: text` needs `color: transparent` to show, and a browser
+ * that clips the background to the box instead of the glyphs would paint a
+ * transparent word on a coloured slab — the title gone entirely.
+ */
 .masthead h1 {
   margin: 0;
-  font-size: 1.5rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: clamp(2.1rem, 7vw, 3.2rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.15em;
+  /* Tracking adds space after the last letter too, which throws the wordmark
+     visibly left of the sub-line beneath it. */
+  margin-right: -0.15em;
+  text-transform: uppercase;
+  color: var(--mark-2);
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .masthead h1 {
+    background-image: linear-gradient(
+      100deg,
+      var(--mark-1) 0%,
+      var(--mark-2) 26%,
+      var(--mark-3) 40%,
+      var(--mark-2) 54%,
+      var(--mark-1) 78%,
+      var(--mark-1) 100%
+    );
+    background-size: 260% 100%;
+    background-position: 100% 0;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 20px var(--mark-glow));
+    animation: wordmark-sheen 9s linear infinite;
+  }
+}
+
+@keyframes wordmark-sheen {
+  from { background-position: 100% 0; }
+  to { background-position: -60% 0; }
+}
+
+/* Stopping the animation must not strand the gradient mid-sweep on a dark
+   stop, so reduced motion parks it at the position the keyframes start from. */
+@media (prefers-reduced-motion: reduce) {
+  .masthead h1 { animation: none; background-position: 100% 0; }
 }
 
 .masthead .sub {
+  font-family: var(--mono);
   color: var(--ink-3);
-  font-size: 0.85rem;
-  margin-top: 2px;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  margin-top: 6px;
 }
 
 /* The connection indicator is deliberately prominent. Stale data presented
@@ -749,8 +841,21 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
 .gpu-thermal.hot { background: var(--tight-bg); color: var(--tight); }
 .gpu-thermal.power { background: var(--surface-2); color: var(--ink-3); }
 
+/*
+ * Sized from the digits it has to show, not by eye.
+ *
+ * `box-sizing: border-box` is global, so the old `width: 8ch` spent 16px of
+ * that budget on padding and border and left under six characters of room:
+ * 59392 scrolled inside its own box with the leading digit clipped, and a
+ * six-figure context like 131072 was worse. Chromium also reserves space for
+ * the number spinners inside the content box, which the character count has to
+ * clear as well — measured at 15px for this font size.
+ */
 .ctx-input {
-  width: 8ch;
+  --ctx-digits: 7ch; /* 131072 is six wide; the seventh keeps the caret off the edge */
+  --ctx-spinner: 18px; /* the up/down arrows are drawn inside the field */
+  --ctx-frame: 16px; /* 7px padding and a 1px border, per side */
+  width: calc(var(--ctx-digits) + var(--ctx-spinner) + var(--ctx-frame));
   font-family: var(--mono);
   font-size: 0.82rem;
   padding: 5px 7px;
@@ -843,6 +948,14 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
 .picker-field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .picker-field select:disabled { opacity: 0.42; cursor: not-allowed; }
 
+/* A field holding a fixed-width control has nothing to do with the 260px the
+   model dropdown wants -- it claimed the space and left it empty, which is room
+   the model key could have used before being truncated. */
+.picker-field.compact {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 .picker-check {
   display: flex;
   align-items: center;
@@ -862,6 +975,13 @@ button.danger:hover:not(:disabled) { border-color: var(--critical); color: var(-
   font-family: var(--mono);
   font-size: 0.79rem;
   color: var(--ink-3);
+}
+
+/* The context is the number in this line most likely to be checked before
+   clicking Start, so it is the one lifted out of the muted grey. */
+.picker-ctx {
+  color: var(--ink-2);
+  font-weight: 600;
 }
 
 /* ---------------------------------------------------------------- bench */

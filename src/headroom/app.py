@@ -376,6 +376,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "license": m.license,
                     "vision_supported": bool(m.vision.get("supported")),
                     "vision_tuned": m.vision_tuned,
+                    # The profile itself, not just two booleans about it. The
+                    # picker has to be able to say what a vision start would
+                    # actually load, and `build_argv` reads that from here --
+                    # `vision.ctx` is a different number from `serve.ctx`, which
+                    # is the whole point of vision being a profile.
+                    "vision": m.vision,
                     "mmproj": m.mmproj,
                     "why_this_build": m.why_this_build,
                     "serve": m.serve,
