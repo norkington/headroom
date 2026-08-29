@@ -242,6 +242,17 @@ rather than being left behind by `pip`.
 **Requirements:** Python 3.11+, an NVIDIA GPU with a working driver (NVML), and
 [`llama.cpp`](https://github.com/ggml-org/llama.cpp) built with `llama-server`.
 
+**Verified on:** Windows 11 and Ubuntu 24.04, both driving a two-card NVIDIA rig
+whose CUDA and NVML device orders disagree — the case the GPU mapping exists for.
+CI runs the suite on `ubuntu-latest` and `windows-latest` against Python 3.11 and
+3.12.
+
+**Not yet supported: non-NVIDIA GPUs.** `GpuBackend` is a Protocol with a single
+NVML implementation, so without an NVIDIA driver there is no telemetry, no
+headroom grading and no thermals. The app still starts and serves — probing,
+registry editing and the command-line builder do not need a GPU — but the part
+that makes it worth running is missing. AMD is the next target.
+
 ### It should work with no configuration
 
 On first run Headroom finds `llama-server` on your `PATH` (or a conventional
