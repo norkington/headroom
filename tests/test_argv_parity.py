@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from headroom.registry import build_argv, load
+from headroom.registry import RegistryError, build_argv, load
 
 
 def _path_from_env(name: str, default: str) -> Path:
@@ -153,10 +153,27 @@ needs_local = pytest.mark.skipif(
 )
 
 
+def _installed_entries() -> list[str]:
+    """Every runnable entry whose weights are on disk.
+
+    Each is a server someone can start from either side, so each is held to the
+    contract. Comparing only the default entry is how an entry that needed keys
+    Headroom did not know (`exe`, `ngl: null`, `fit_target`) went unnoticed: it
+    loaded fine and would have launched a different server.
+    """
+    if not REGISTRY.exists():
+        return []
+    try:
+        return [key for key, entry in load(REGISTRY).models.items() if entry.installed]
+    except RegistryError:  # a broken registry is reported by the tests, not at collection
+        return []
+
+
 @needs_local
-def test_argv_matches_shell_launcher() -> None:
+@pytest.mark.parametrize("key", _installed_entries())
+def test_argv_matches_shell_launcher(key: str) -> None:
     registry = load(REGISTRY)
-    entry = registry.get()
+    entry = registry.get(key)
     mine = build_argv(entry, LLAMA_SERVER)
 
     proc = subprocess.run(
@@ -167,6 +184,8 @@ def test_argv_matches_shell_launcher() -> None:
             "Bypass",
             "-File",
             str(LAUNCHER),
+            "-Model",
+            key,
             "-DryRun",
         ],
         capture_output=True,
@@ -193,6 +212,18 @@ def test_argv_matches_shell_launcher() -> None:
     assert mine_bool == their_bool, (
         f"boolean flags differ: headroom={mine_bool - their_bool} launcher={their_bool - mine_bool}"
     )
+
+    # The executable is normally outside the contract (see LLAMA_SERVER above), but
+    # an entry that pins its own build makes it part of the configuration: launching
+    # it with a different llama.cpp is launching a different server.
+    if entry.serve.get("exe"):
+
+        def norm(p: str) -> str:
+            return p.replace("\\", "/").casefold()
+
+        assert norm(mine[0]) == norm(theirs[0]), (
+            f"{key} pins its build, but headroom would run {mine[0]} and the launcher {theirs[0]}"
+        )
 
 
 @needs_local

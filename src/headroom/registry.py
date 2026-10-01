@@ -161,7 +161,7 @@ def load(path: str | Path) -> Registry:
 
 def build_argv(
     entry: ModelEntry,
-    llama_server_exe: str | Path,
+    llama_server_exe: str | Path | None,
     *,
     port: int = 8080,
     vision: bool = False,
@@ -186,6 +186,18 @@ def build_argv(
     - **`--cache-ram` is a HOST RAM prompt cache**, not VRAM. It does not compete
       with the model for GPU memory, but on a model that keeps tens of GiB of
       experts in system RAM it absolutely competes there.
+
+    - **`exe` pins an entry to a specific llama.cpp build.** A new architecture
+      can need a newer build than the one serving everything else, and moving
+      the shared build forward risks the models that already work on it. When
+      set, it wins over the configured executable.
+
+    - **`ngl: null` means "leave -ngl out", which is not the same as absent.**
+      Absent keeps the long-standing default of 99. An explicit null hands layer
+      placement to llama-server's `--fit`, which moves an MoE's expert tensors
+      to system RAM until every card keeps `fit_target` MiB free; passing any
+      -ngl counts as user-set and switches that fitting off, so an MoE too big
+      for VRAM then fails to allocate.
     """
     s = dict(entry.serve)
     if overrides:
@@ -194,6 +206,12 @@ def build_argv(
     model_path = entry.path
     if not model_path.exists():
         raise RegistryError(f"model file missing: {model_path}")
+
+    exe = s.get("exe") or llama_server_exe
+    if s.get("exe") and not Path(s["exe"]).exists():
+        raise RegistryError(f"{entry.key} pins a llama-server build that is not there: {s['exe']}")
+    if not exe:
+        raise RegistryError("no llama-server executable is configured, and the entry names none")
 
     ctx = int(s.get("ctx", 4096))
     split = s.get("split") or ""
@@ -213,14 +231,11 @@ def build_argv(
     ubatch = int(s.get("ubatch", 512))
     batch = max(int(s.get("batch", 2048)), ubatch)
 
-    argv: list[str] = [
-        str(llama_server_exe),
-        "-m",
-        str(model_path),
-        "--ctx-size",
-        str(ctx),
-        "-ngl",
-        str(s.get("ngl", 99)),
+    ngl = s.get("ngl", 99)  # absent -> 99, explicit null -> None (omitted below)
+    argv: list[str] = [str(exe), "-m", str(model_path), "--ctx-size", str(ctx)]
+    if ngl is not None:
+        argv += ["-ngl", str(ngl)]
+    argv += [
         "-fa",
         str(s.get("flash_attn", "on")),
         "-ub",
@@ -255,6 +270,9 @@ def build_argv(
                 "are selected; they must match"
             )
         argv += ["-ts", split]
+
+    if s.get("fit_target"):
+        argv += ["-fitt", str(s["fit_target"])]
 
     if s.get("jinja", True):
         argv.append("--jinja")
