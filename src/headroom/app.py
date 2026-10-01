@@ -187,6 +187,19 @@ class State:
         return gpus
 
 
+def _pins_own_build(registry_path: Path, model: str | None) -> bool:
+    """Whether the entry being started names its own llama-server (`serve.exe`).
+
+    Such an entry can start with no executable configured globally, so the
+    "nothing to start" refusal must not fire for it. Any registry problem answers
+    False here and is reported properly by the load that follows.
+    """
+    try:
+        return bool(registry_mod.load(registry_path).get(model).serve.get("exe"))
+    except registry_mod.RegistryError:
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
@@ -426,7 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             )
 
-        if settings.llama_server is None:
+        if settings.llama_server is None and not _pins_own_build(settings.registry_path, model):
             raise HTTPException(
                 status_code=503,
                 detail=(

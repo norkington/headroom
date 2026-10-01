@@ -752,6 +752,77 @@ def test_missing_model_file_is_reported_clearly(fake_registry: Path, tmp_path: P
         build_argv(entry, "llama-server")
 
 
+def test_an_entry_can_pin_its_own_build(fake_registry: Path, tmp_path: Path) -> None:
+    """A new architecture can need a newer llama.cpp than everything else uses."""
+    own = tmp_path / "next" / "llama-server.exe"
+    own.parent.mkdir()
+    own.write_bytes(b"")
+    entry = load(fake_registry).get()
+    entry.serve["exe"] = str(own)
+
+    argv = build_argv(entry, "llama-server")
+    assert argv[0] == str(own), "the entry's build wins over the configured one"
+
+
+def test_a_pinned_build_that_is_missing_is_reported(fake_registry: Path, tmp_path: Path) -> None:
+    entry = load(fake_registry).get()
+    entry.serve["exe"] = str(tmp_path / "nowhere" / "llama-server.exe")
+    with pytest.raises(RegistryError, match="not there"):
+        build_argv(entry, "llama-server")
+
+
+def test_only_an_entry_with_its_own_build_starts_without_one_configured(
+    fake_registry: Path, tmp_path: Path
+) -> None:
+    entry = load(fake_registry).get()
+    with pytest.raises(RegistryError, match="no llama-server"):
+        build_argv(entry, None)
+
+    own = tmp_path / "llama-server.exe"
+    own.write_bytes(b"")
+    entry.serve["exe"] = str(own)
+    assert build_argv(entry, None)[0] == str(own)
+
+
+def test_null_ngl_leaves_layer_placement_to_fit(fake_registry: Path) -> None:
+    """An explicit -ngl switches llama-server's --fit off, and an MoE too big for
+    VRAM then fails to allocate -- so null must mean the flag is absent."""
+    entry = load(fake_registry).get()
+    entry.serve["ngl"] = None
+    entry.serve["fit_target"] = 1200
+
+    argv = build_argv(entry, "llama-server")
+    assert "-ngl" not in argv
+    assert argv[argv.index("-fitt") + 1] == "1200"
+
+
+def test_absent_ngl_is_not_null_ngl(fake_registry: Path) -> None:
+    """Absent keeps the long-standing default; only an explicit null omits it."""
+    entry = load(fake_registry).get()
+    del entry.serve["ngl"]
+
+    argv = build_argv(entry, "llama-server")
+    assert argv[argv.index("-ngl") + 1] == "99"
+    assert "-fitt" not in argv, "no fit_target, no -fitt"
+
+
+def test_the_start_gate_lets_an_entry_with_its_own_build_through(
+    fake_registry: Path, tmp_path: Path
+) -> None:
+    """Refusing to start because no global llama-server is configured is right --
+    unless the entry being started names its own."""
+    from headroom.app import _pins_own_build
+
+    assert _pins_own_build(fake_registry, "demo") is False
+
+    doc = json.loads(fake_registry.read_text(encoding="utf-8"))
+    doc["models"]["demo"]["serve"]["exe"] = str(tmp_path / "llama-server.exe")
+    fake_registry.write_text(json.dumps(doc), encoding="utf-8")
+    assert _pins_own_build(fake_registry, "demo") is True
+
+    assert _pins_own_build(tmp_path / "no-such-registry.json", "demo") is False
+
+
 def test_measured_provenance_is_distinguished(fake_registry: Path) -> None:
     """Inherited numbers must not be indistinguishable from measured ones."""
     reg = load(fake_registry)
