@@ -823,6 +823,120 @@ def test_the_start_gate_lets_an_entry_with_its_own_build_through(
     assert _pins_own_build(tmp_path / "no-such-registry.json", "demo") is False
 
 
+# ---------------------------------------------------------------- working directory
+
+
+def test_spawn_runs_llama_server_in_the_log_directory(monkeypatch, tmp_path: Path) -> None:
+    """ffmpeg's cache: protocol writes its temp file to the current directory on
+    Windows; from an unwritable one every video silently becomes zero frames."""
+    import subprocess
+
+    from headroom import server
+
+    seen: dict = {}
+
+    class FakePopen:
+        pid = 4242
+
+        def __init__(self, argv, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    log_path = tmp_path / "logs" / "llama-server-demo.log"
+    assert server.spawn_detached(["llama-server"], log_path) == 4242
+    assert seen["cwd"] == str(log_path.parent)
+
+
+def test_spawned_process_really_starts_in_the_log_directory(tmp_path: Path) -> None:
+    """The same, observed from inside a real child rather than read off Popen's kwargs."""
+    import os
+    import sys
+    import time
+
+    from headroom import server
+
+    log_path = tmp_path / "logs" / "child.log"
+    try:
+        server.spawn_detached(
+            [sys.executable, "-c", "import os; print(os.getcwd(), flush=True)"], log_path
+        )
+    except server.SpawnError as exc:  # e.g. a CI job object that forbids breakaway
+        pytest.skip(f"cannot spawn detached here: {exc}")
+
+    deadline = time.monotonic() + 30
+    reported = ""
+    while time.monotonic() < deadline and not reported:
+        time.sleep(0.2)
+        reported = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    assert reported, "the child never wrote its working directory"
+    assert os.path.samefile(reported, log_path.parent)
+
+
+@pytest.mark.skipif(not __import__("sys").platform.startswith("win"), reason="WMI is Windows-only")
+def test_wmi_spawn_sets_the_working_directory_too(monkeypatch, tmp_path: Path) -> None:
+    """Without CurrentDirectory a WMI-created process starts in C:\\Windows\\System32."""
+    import subprocess
+
+    from headroom import server
+
+    sent: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        sent.append(cmd[-1])
+        return subprocess.CompletedProcess(cmd, 0, stdout="0 4242\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    log_path = tmp_path / "it's here" / "llama-server-demo.log"
+    assert server.spawn_via_wmi(["llama-server"], log_path) == 4242
+    quoted = str(log_path.parent).replace("'", "''")
+    assert f"CurrentDirectory = '{quoted}'" in sent[0], "an apostrophe must not end the literal"
+
+
+def test_relative_paths_are_pinned_before_the_directory_changes(
+    fake_registry: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """llama-server runs in the log directory, so relative paths must become absolute,
+    resolved where they were already checked: the current directory."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "templates").mkdir()
+    (tmp_path / "templates" / "chat.jinja").write_text("{{ x }}", encoding="utf-8")
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "llama-server.exe").write_bytes(b"")
+
+    entry = load(fake_registry).get()
+    entry.directory = "weights"  # relative to tmp_path, where the fixture put the files
+    entry.serve["chat_template_file"] = "templates/chat.jinja"
+    entry.serve["exe"] = "bin/llama-server.exe"
+
+    argv = build_argv(entry, "llama-server", vision=True)
+    pinned = {
+        "-m": tmp_path / "weights" / "fake.gguf",
+        "--chat-template-file": tmp_path / "templates" / "chat.jinja",
+        "--mmproj": tmp_path / "weights" / "mmproj.gguf",
+    }
+    for flag, want in pinned.items():
+        got = Path(argv[argv.index(flag) + 1])
+        assert got.is_absolute(), f"{flag} stayed relative: {got}"
+        assert got == want.resolve(), flag
+    assert Path(argv[0]) == (tmp_path / "bin" / "llama-server.exe").resolve()
+
+
+def test_absolute_paths_and_bare_commands_are_passed_through_untouched(
+    fake_registry: Path, tmp_path: Path
+) -> None:
+    """Rewriting an absolute path would change its separators and break parity with the
+    shell launcher; a bare command name must still be looked up on PATH."""
+    entry = load(fake_registry).get()
+    # registries write paths with forward slashes, and the launcher passes them verbatim
+    template = str(tmp_path / "chat.jinja").replace("\\", "/")
+    entry.serve["chat_template_file"] = template
+
+    argv = build_argv(entry, "llama-server")
+    assert argv[0] == "llama-server"
+    assert argv[argv.index("--chat-template-file") + 1] == template
+    assert argv[argv.index("-m") + 1] == str(entry.path)
+
+
 def test_measured_provenance_is_distinguished(fake_registry: Path) -> None:
     """Inherited numbers must not be indistinguishable from measured ones."""
     reg = load(fake_registry)
