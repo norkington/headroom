@@ -159,6 +159,26 @@ def load(path: str | Path) -> Registry:
     return Registry(path=path, default=default, models=models, raw=raw)
 
 
+def _pinned(path: str | Path, *, command: bool = False) -> str:
+    """A path that still means the same file after llama-server's directory changes.
+
+    `server.spawn_detached` starts llama-server in the log directory, so a relative
+    path would be resolved against the wrong place. Relative paths are made absolute
+    against the current directory -- where every check above already resolved them.
+    Absolute paths are returned exactly as given: they must match the shell launcher
+    character for character, and resolving would rewrite their separators.
+
+    With `command=True` a bare name such as ``llama-server`` is left alone, so the
+    system still finds it on PATH.
+    """
+    text = str(path)
+    if Path(text).is_absolute():
+        return text
+    if command and "/" not in text and "\\" not in text:
+        return text
+    return str(Path(text).resolve())
+
+
 def build_argv(
     entry: ModelEntry,
     llama_server_exe: str | Path | None,
@@ -232,7 +252,13 @@ def build_argv(
     batch = max(int(s.get("batch", 2048)), ubatch)
 
     ngl = s.get("ngl", 99)  # absent -> 99, explicit null -> None (omitted below)
-    argv: list[str] = [str(exe), "-m", str(model_path), "--ctx-size", str(ctx)]
+    argv: list[str] = [
+        _pinned(exe, command=True),
+        "-m",
+        _pinned(model_path),
+        "--ctx-size",
+        str(ctx),
+    ]
     if ngl is not None:
         argv += ["-ngl", str(ngl)]
     argv += [
@@ -277,7 +303,7 @@ def build_argv(
     if s.get("jinja", True):
         argv.append("--jinja")
     if s.get("chat_template_file"):
-        argv += ["--chat-template-file", str(s["chat_template_file"])]
+        argv += ["--chat-template-file", _pinned(s["chat_template_file"])]
 
     sampling = s.get("sampling") or {}
     for flag, key in (
@@ -303,7 +329,7 @@ def build_argv(
         mmproj = entry.mmproj_path
         if not mmproj or not mmproj.exists():
             raise RegistryError(f"projector missing: {mmproj}")
-        argv += ["--mmproj", str(mmproj)]
+        argv += ["--mmproj", _pinned(mmproj)]
         if entry.vision.get("image_min_tokens"):
             argv += ["--image-min-tokens", str(entry.vision["image_min_tokens"])]
 

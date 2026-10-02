@@ -199,6 +199,16 @@ def spawn_detached(argv: list[str], log_path: Path, env: dict[str, str] | None =
 
     On POSIX, `start_new_session=True` calls setsid, which detaches from the
     controlling terminal and process group.
+
+    **The child runs in the log directory**, not in whatever directory this process
+    happens to have. For video input llama-server starts ffmpeg on `cache:pipe:0`,
+    and on Windows ffmpeg's `cache:` protocol writes its temp file to the current
+    directory. Started from an unwritable one -- `C:\\Windows\\System32` is the
+    default for anything launched through WMI, and common for services -- that write
+    fails and every video silently becomes zero frames: the request succeeds and the
+    model says it cannot see a video. The log directory was just created here, so it
+    is known to be writable. `registry.build_argv` makes relative paths absolute so
+    the change of directory cannot break them.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_path, "ab", buffering=0)  # noqa: SIM115 - deliberately outlives this call
@@ -208,6 +218,7 @@ def spawn_detached(argv: list[str], log_path: Path, env: dict[str, str] | None =
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
+        "cwd": str(log_path.parent),
     }
     if env is not None:
         kwargs["env"] = {**os.environ, **env}
@@ -240,6 +251,10 @@ def spawn_via_wmi(argv: list[str], log_path: Path) -> int:
     becomes the parent, so the new process is outside the job entirely.
 
     Costs a PowerShell round trip, so it is not the default.
+
+    Runs the child in the log directory, for the same reason as `spawn_detached`.
+    This path needs it most: without `CurrentDirectory`, a WMI-created process
+    starts in `C:\\Windows\\System32`.
     """
     if sys.platform != "win32":
         raise SpawnError("spawn_via_wmi is Windows-only")
@@ -247,9 +262,10 @@ def spawn_via_wmi(argv: list[str], log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     quoted = " ".join(f'"{a}"' if " " in a else a for a in argv)
     command = f'cmd.exe /c {quoted} > "{log_path}" 2>&1'
+    workdir = str(log_path.parent).replace("'", "''")  # PowerShell single-quoted literal
     ps = (
         "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
-        f"-Arguments @{{ CommandLine = '{command}' }}; "
+        f"-Arguments @{{ CommandLine = '{command}'; CurrentDirectory = '{workdir}' }}; "
         'Write-Output "$($r.ReturnValue) $($r.ProcessId)"'
     )
     result = subprocess.run(
